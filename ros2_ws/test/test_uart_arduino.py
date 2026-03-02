@@ -346,7 +346,8 @@ class UARTTest:
             'decode_errors_by_type': {},
             'by_type':               {},  # counts per TLV type name
             # RPi→Arduino direction — read from SYS_STATUS.uartRxErrors
-            'arduino_uart_rx_errors': 0,  # latest value from firmware
+            'arduino_uart_rx_errors_baseline': None,  # first value seen (pre-connection errors)
+            'arduino_uart_rx_errors_current':  0,     # latest value from firmware
         }
 
     # ---- Connection ----
@@ -516,15 +517,26 @@ class UARTTest:
             return
         s = PayloadSystemStatus.from_buffer_copy(tlv_data)
 
-        # Capture RPi→Arduino error count for quality report
-        self.stats['arduino_uart_rx_errors'] = s.uartRxErrors
+        # Capture RPi→Arduino error count.
+        # First value seen becomes the baseline (errors before Python connected).
+        if self.stats['arduino_uart_rx_errors_baseline'] is None:
+            self.stats['arduino_uart_rx_errors_baseline'] = s.uartRxErrors
+            if s.uartRxErrors > 0:
+                print(f"  [SYS_STATUS] NOTE: Arduino already had {s.uartRxErrors} "
+                      f"uartRxErrors at connect time (pre-connection noise) — "
+                      f"using as baseline, delta will be 0 if link is clean")
+        self.stats['arduino_uart_rx_errors_current'] = s.uartRxErrors
+
+        baseline = self.stats['arduino_uart_rx_errors_baseline']
+        delta    = s.uartRxErrors - baseline
 
         state_name = SYS_STATE_NAMES.get(s.state, f"?{s.state}")
         errors = [name for bit, name in ERROR_FLAGS.items() if s.errorFlags & bit]
-        rx_err_marker = f"  *** RX_ERR={s.uartRxErrors} ***" if s.uartRxErrors else ""
+        delta_marker = f"  *** +{delta} NEW ***" if delta > 0 else ""
         print(f"  [SYS_STATUS] v{s.firmwareMajor}.{s.firmwareMinor}.{s.firmwarePatch}  "
               f"state={state_name}  uptime={s.uptimeMs/1000:.1f}s  "
-              f"uartRxErr(RPi→Ard)={s.uartRxErrors}{rx_err_marker}")
+              f"uartRxErr(RPi→Ard): total={s.uartRxErrors} baseline={baseline} delta={delta}"
+              f"{delta_marker}")
         print(f"    errors={'|'.join(errors) if errors else 'none'}  "
               f"lastRx={s.lastRxMs} ms ago  "
               f"SRAM={s.freeSram} B  loop={s.loopTimeAvgUs}/{s.loopTimeMaxUs} µs")
@@ -601,20 +613,22 @@ class UARTTest:
         good   = self.stats['frames_received']
         errors = self.stats['decode_errors']
         total  = good + errors
-        ard_rx = self.stats['arduino_uart_rx_errors']
 
-        # Arduino→RPi error rate (decode failures on Python side)
+        baseline = self.stats['arduino_uart_rx_errors_baseline'] or 0
+        current  = self.stats['arduino_uart_rx_errors_current']
+        delta    = current - baseline   # errors since Python connected
+        hb_sent  = self.stats['heartbeats_sent']
+
+        # Arduino→RPi error rate
         a2r_rate = (errors / total * 100) if total > 0 else 0.0
-
-        # RPi→Arduino: we only have the absolute count, estimate rate
-        r2a_rate = (ard_rx / self.stats['heartbeats_sent'] * 100) \
-                   if self.stats['heartbeats_sent'] > 0 else 0.0
+        # RPi→Arduino error rate (delta only — excludes pre-connection noise)
+        r2a_rate = (delta / hb_sent * 100) if hb_sent > 0 else 0.0
 
         print()
         print("=" * 62)
         print(f"  LINK QUALITY REPORT  —  {self.baudrate} baud")
         print("=" * 62)
-        print(f"  Arduino → RPi (decode errors / frames received):")
+        print(f"  Arduino → RPi  (Python decode errors / frames):")
         print(f"    Good frames : {good}")
         print(f"    Errors      : {errors}")
         if self.stats['decode_errors_by_type']:
@@ -622,10 +636,14 @@ class UARTTest:
                 print(f"      {k}: {v}")
         print(f"    Quality     : {self._quality_label(a2r_rate)}")
         print()
-        print(f"  RPi → Arduino (uartRxErrors from SYS_STATUS):")
-        print(f"    Heartbeats sent : {self.stats['heartbeats_sent']}")
-        print(f"    RX errors (fw)  : {ard_rx}")
-        print(f"    Quality         : {self._quality_label(r2a_rate)}")
+        print(f"  RPi → Arduino  (firmware uartRxErrors, delta since connect):")
+        print(f"    Heartbeats sent     : {hb_sent}")
+        print(f"    Errors at connect   : {baseline}  (pre-connection noise, excluded)")
+        print(f"    New errors (delta)  : {delta}")
+        print(f"    Quality             : {self._quality_label(r2a_rate)}")
+        if baseline > 0 and delta == 0:
+            print(f"    NOTE: all {baseline} errors occurred before Python connected —")
+            print(f"          link is CLEAN since connection (likely boot noise on RX pin)")
         if self.stats['by_type']:
             print()
             print("  TLV counts received:")

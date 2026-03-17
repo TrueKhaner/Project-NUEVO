@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { motion } from 'motion/react';
-import { AlertTriangle, ChevronDown } from 'lucide-react';
+import { AlertTriangle, BatteryWarning, ChevronDown } from 'lucide-react';
 import { useRobotStore } from '../store/robotStore';
+
+const VBAT_MIN_PRESENT = 2.0; // matches firmware VBAT_MIN_PRESENT_V
 
 type BatteryType = '10 Cell NiMH' | '3S LiPo' | '4S LiPo';
 
@@ -24,6 +26,7 @@ export function PowerSection() {
 
   const getBatteryWarning = () => {
     if (!voltage) return { show: false, type: '' };
+    if (batteryVoltage < VBAT_MIN_PRESENT) return { show: true, type: 'none' };
     if (batteryVoltage < batteryRange.min) return { show: true, type: 'low' };
     if (batteryVoltage > batteryRange.max) return { show: true, type: 'high' };
     return { show: false, type: '' };
@@ -95,11 +98,20 @@ export function PowerSection() {
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm text-white/70">Battery</span>
               <div className="flex items-center gap-2">
-                <span className="text-sm font-mono text-white font-semibold">
-                  {voltage ? batteryVoltage.toFixed(1) : '--'}V
-                </span>
-                {batteryWarning.show && (
-                  <AlertTriangle className="size-4 text-amber-400" />
+                {batteryWarning.type === 'none' ? (
+                  <>
+                    <span className="text-xs font-semibold text-rose-400">No battery</span>
+                    <BatteryWarning className="size-4 text-rose-400" />
+                  </>
+                ) : (
+                  <>
+                    <span className="text-sm font-mono text-white font-semibold">
+                      {voltage ? batteryVoltage.toFixed(1) : '--'}V
+                    </span>
+                    {batteryWarning.show && (
+                      <AlertTriangle className="size-4 text-amber-400" />
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -107,13 +119,16 @@ export function PowerSection() {
             <div className="h-3 rounded-full backdrop-blur-xl bg-white/10 border border-white/20 overflow-hidden">
               <div
                 className={`h-full transition-all duration-300 ${
+                  batteryWarning.type === 'none' ? 'bg-rose-500/60' :
                   batteryWarning.show ? 'bg-amber-400' : 'bg-emerald-400'
                 }`}
                 style={{
-                  width: `${batteryPct}%`,
-                  boxShadow: batteryWarning.show
-                    ? '0 0 12px rgba(251, 191, 36, 0.6)'
-                    : '0 0 12px rgba(52, 211, 153, 0.6)',
+                  width: batteryWarning.type === 'none' ? '100%' : `${batteryPct}%`,
+                  boxShadow: batteryWarning.type === 'none'
+                    ? '0 0 12px rgba(244, 63, 94, 0.4)'
+                    : batteryWarning.show
+                      ? '0 0 12px rgba(251, 191, 36, 0.6)'
+                      : '0 0 12px rgba(52, 211, 153, 0.6)',
                 }}
               />
             </div>

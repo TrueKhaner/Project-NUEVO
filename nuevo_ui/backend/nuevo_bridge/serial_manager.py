@@ -105,6 +105,7 @@ class SerialManager:
 
         self._running = False
         self._pending_messages: list = []  # accumulated within one decoder.decode() call
+        self._heartbeat_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     # ROS2 integration hook
@@ -254,6 +255,23 @@ class SerialManager:
         p.flags = 0
         self.send(SYS_HEARTBEAT, p)
 
+    def _heartbeat_loop(self) -> None:
+        """
+        Dedicated heartbeat thread.
+
+        Heartbeats must not depend on the asyncio event loop because heavy
+        WebSocket fan-out during RUNNING telemetry can delay the loop long
+        enough to trip the Arduino's 500 ms liveness timeout.
+        """
+        print("[Serial] Heartbeat thread started.")
+        while self._running:
+            now = time.monotonic()
+            if self.connected and now - self.last_heartbeat_time >= HEARTBEAT_INTERVAL:
+                self._send_heartbeat()
+                self.last_heartbeat_time = now
+            time.sleep(min(0.05, HEARTBEAT_INTERVAL * 0.25))
+        print("[Serial] Heartbeat thread stopped.")
+
     # ------------------------------------------------------------------
     # Stats broadcast
     # ------------------------------------------------------------------
@@ -291,16 +309,18 @@ class SerialManager:
         )
         reader_thread.start()
 
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            daemon=True,
+            name="serial-heartbeat",
+        )
+        self._heartbeat_thread.start()
+
         print("[Serial] Manager started (reader thread is hardware-driven).")
 
         try:
             while self._running:
                 now = time.time()
-
-                # Heartbeat: send() uses _write_lock; hold time is sub-ms
-                if self.connected and now - self.last_heartbeat_time >= HEARTBEAT_INTERVAL:
-                    self._send_heartbeat()
-                    self.last_heartbeat_time = now
 
                 if now - self.last_stats_time >= STATS_INTERVAL:
                     await self._broadcast_stats()
@@ -310,6 +330,8 @@ class SerialManager:
                 await asyncio.sleep(0.05)
         finally:
             reader_thread.join(timeout=2.0)
+            if self._heartbeat_thread is not None:
+                self._heartbeat_thread.join(timeout=2.0)
 
     def stop(self) -> None:
         self._running = False

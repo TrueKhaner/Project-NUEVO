@@ -236,77 +236,77 @@ export function UserIOSection() {
               <Plus className="size-3 text-white" />
             </button>
           </div>
+
+          {/* Color picker — absolute inside rgbContainerRef so pickerPos coordinates match */}
+          {showPicker !== null && strips.find((s) => s.id === showPicker) && (
+            <div className="absolute z-50" style={{ left: pickerPos.x, top: pickerPos.y }}>
+              <div
+                className="ml-3 w-0 h-0"
+                style={{
+                  borderLeft: "6px solid transparent",
+                  borderRight: "6px solid transparent",
+                  borderBottom: "6px solid rgba(255, 255, 255, 0.2)",
+                }}
+              />
+              <div className="rounded-2xl backdrop-blur-2xl bg-white/10 border border-white/20 shadow-2xl p-4">
+                <div className="flex justify-end mb-2">
+                  <button
+                    onClick={() => setShowPicker(null)}
+                    className="p-1 rounded-lg backdrop-blur-xl bg-white/10 border border-white/20 hover:bg-white/20 transition-all"
+                  >
+                    <X className="size-3 text-white" />
+                  </button>
+                </div>
+
+                {/* Hue ring */}
+                <div className="flex justify-center mb-4">
+                  <div
+                    onClick={handleHueClick}
+                    className="relative w-32 h-32 rounded-full cursor-pointer"
+                    style={{
+                      background: `conic-gradient(
+                        hsl(0,100%,50%), hsl(30,100%,50%), hsl(60,100%,50%),
+                        hsl(90,100%,50%), hsl(120,100%,50%), hsl(150,100%,50%),
+                        hsl(180,100%,50%), hsl(210,100%,50%), hsl(240,100%,50%),
+                        hsl(270,100%,50%), hsl(300,100%,50%), hsl(330,100%,50%),
+                        hsl(360,100%,50%))`,
+                    }}
+                  >
+                    <div className="absolute inset-4 rounded-full backdrop-blur-xl bg-white/10 border border-white/20" />
+                    <div
+                      className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 size-8 rounded-full border-2 border-white shadow-lg"
+                      style={{
+                        backgroundColor: rgbToHex(
+                          strips.find((s) => s.id === showPicker)!.r,
+                          strips.find((s) => s.id === showPicker)!.g,
+                          strips.find((s) => s.id === showPicker)!.b,
+                        ),
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {/* Brightness slider */}
+                <div className="space-y-2 w-48">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-white/70">Brightness</span>
+                    <span className="text-xs font-mono text-white">
+                      {strips.find((s) => s.id === showPicker)?.brightness ?? 0}%
+                    </span>
+                  </div>
+                  <Slider
+                    value={[strips.find((s) => s.id === showPicker)?.brightness ?? 0]}
+                    onValueChange={(val) => updateStrip(showPicker!, { brightness: val[0] })}
+                    min={0}
+                    max={100}
+                    step={1}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
-
-      {/* Color picker popout — inline so it scrolls with the page */}
-      {showPicker !== null && strips.find((s) => s.id === showPicker) && (
-        <div className="absolute z-50" style={{ left: pickerPos.x, top: pickerPos.y }}>
-          <div
-            className="ml-3 w-0 h-0"
-            style={{
-              borderLeft: "6px solid transparent",
-              borderRight: "6px solid transparent",
-              borderBottom: "6px solid rgba(255, 255, 255, 0.2)",
-            }}
-          />
-          <div className="rounded-2xl backdrop-blur-2xl bg-white/10 border border-white/20 shadow-2xl p-4">
-            <div className="flex justify-end mb-2">
-              <button
-                onClick={() => setShowPicker(null)}
-                className="p-1 rounded-lg backdrop-blur-xl bg-white/10 border border-white/20 hover:bg-white/20 transition-all"
-              >
-                <X className="size-3 text-white" />
-              </button>
-            </div>
-
-            {/* Hue ring */}
-            <div className="flex justify-center mb-4">
-              <div
-                onClick={handleHueClick}
-                className="relative w-32 h-32 rounded-full cursor-pointer"
-                style={{
-                  background: `conic-gradient(
-                    hsl(0,100%,50%), hsl(30,100%,50%), hsl(60,100%,50%),
-                    hsl(90,100%,50%), hsl(120,100%,50%), hsl(150,100%,50%),
-                    hsl(180,100%,50%), hsl(210,100%,50%), hsl(240,100%,50%),
-                    hsl(270,100%,50%), hsl(300,100%,50%), hsl(330,100%,50%),
-                    hsl(360,100%,50%))`,
-                }}
-              >
-                <div className="absolute inset-4 rounded-full backdrop-blur-xl bg-white/10 border border-white/20" />
-                <div
-                  className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 size-8 rounded-full border-2 border-white shadow-lg"
-                  style={{
-                    backgroundColor: rgbToHex(
-                      strips.find((s) => s.id === showPicker)!.r,
-                      strips.find((s) => s.id === showPicker)!.g,
-                      strips.find((s) => s.id === showPicker)!.b,
-                    ),
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Brightness slider */}
-            <div className="space-y-2 w-48">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-white/70">Brightness</span>
-                <span className="text-xs font-mono text-white">
-                  {strips.find((s) => s.id === showPicker)?.brightness ?? 0}%
-                </span>
-              </div>
-              <Slider
-                value={[strips.find((s) => s.id === showPicker)?.brightness ?? 0]}
-                onValueChange={(val) => updateStrip(showPicker!, { brightness: val[0] })}
-                min={0}
-                max={100}
-                step={1}
-              />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -108,6 +108,12 @@ cd frontend && npm run build && cd .. && cp -r frontend/dist/. backend/static/
 ---
 
 ## Running the backend
+### install required Python packages
+
+```bash
+cd nuevo_ui/backend
+pip install -e . --break-system-packages
+```
 
 ### Plain Python (no ROS2, mock mode)
 

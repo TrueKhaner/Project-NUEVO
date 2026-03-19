@@ -30,7 +30,7 @@ The frontend must be compiled to static files so `nuevo_bridge` can serve everyt
 
 ```bash
 # From nuevo_ui/
-cd frontend && npm run build && cd .. && cp -r frontend/dist/. backend/static/
+cd frontend && npm ci && npm run build && cd .. && cp -r frontend/dist/. backend/static/
 ```
 
 Then start the backend — it serves both the API and the compiled UI:

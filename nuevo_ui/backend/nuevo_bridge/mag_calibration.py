@@ -207,15 +207,17 @@ def fit_soft_iron_calibration(samples: Sequence[Tuple[float, float, float]]) -> 
 
 
 class MagCalibrationController:
-    MIN_SAMPLES = 200
+    MIN_SAMPLES = 150
     MIN_DURATION_S = 6.0
     MAX_DURATION_S = 30.0
-    MIN_AXIS_SPAN_UT = 10.0
-    MIN_AXIS_RATIO = 0.25
+    MIN_AXIS_SPAN_UT = 8.0
+    MIN_AXIS_RATIO = 0.18
     SPAN_GROWTH_EPS_UT = 0.5
     FIT_RETRY_INTERVAL_S = 0.5
-    MAX_STD_RATIO = 0.55
+    MAX_STD_RATIO = 0.75
     TIMEOUT_STD_RATIO = 0.90
+    TIMEOUT_MIN_SAMPLES = 100
+    TIMEOUT_MIN_AXIS_SPAN_UT = 4.0
     MAX_SAMPLES = 4096
 
     def __init__(self, sender: Optional[Callable[[str, dict], bool]] = None):
@@ -328,6 +330,8 @@ class MagCalibrationController:
         if elapsed >= self.MAX_DURATION_S:
             if self._best_result is not None:
                 self._apply_best_result()
+            elif self._can_apply_hard_iron_fallback(spans):
+                self._apply_hard_iron_fallback()
             else:
                 self._send_command("sensor_mag_cal_cmd", {"command": 2})
                 self._reset()
@@ -346,6 +350,27 @@ class MagCalibrationController:
     def _apply_best_result(self) -> None:
         if self._best_result is not None:
             self._apply_result(self._best_result)
+
+    def _can_apply_hard_iron_fallback(self, spans: Sequence[float]) -> bool:
+        return (
+            len(self._samples) >= self.TIMEOUT_MIN_SAMPLES and
+            min(spans) >= self.TIMEOUT_MIN_AXIS_SPAN_UT
+        )
+
+    def _apply_hard_iron_fallback(self) -> None:
+        offset = (
+            (self._max[0] + self._min[0]) * 0.5,
+            (self._max[1] + self._min[1]) * 0.5,
+            (self._max[2] + self._min[2]) * 0.5,
+        )
+        if self._send_command("sensor_mag_cal_cmd", {
+            "command": 4,
+            "offsetX": offset[0],
+            "offsetY": offset[1],
+            "offsetZ": offset[2],
+            "softIronMatrix": list(IDENTITY_3X3),
+        }):
+            self._apply_sent = True
 
     def get_ui_status(self) -> dict:
         sample_count = len(self._samples)
@@ -378,10 +403,12 @@ class MagCalibrationController:
             math.isfinite(self._best_std_ratio) and
             self._best_std_ratio <= self.MAX_STD_RATIO
         )
+        fallback_ready = self._can_apply_hard_iron_fallback(spans)
 
         return {
             "bridgeProgress": progress,
             "bridgeReady": ready,
+            "bridgeFallbackReady": fallback_ready,
             "bridgeSampleProgress": sample_progress,
             "bridgeSpanProgress": span_progress,
             "bridgeRatioProgress": ratio_progress,

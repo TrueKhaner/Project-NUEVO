@@ -101,6 +101,26 @@ def main() -> None:
     assert cmd == "sensor_mag_cal_cmd"
     assert data["command"] == 4
 
+    # Timeout fallback to hard-iron-only when full fit is not available
+    sent = []
+    controller = MagCalibrationController(sender=lambda cmd, data: sent.append((cmd, data)) or True)
+    controller.observe("sensor_mag_cal_status", {"state": 1})
+    controller._sampling = True
+    controller._start_time -= controller.MAX_DURATION_S + 1.0
+    planar_samples = [(20.0 + 0.2 * i, -15.0 + 0.1 * i, 2.0 + 0.05 * i) for i in range(160)]
+    controller._samples = list(planar_samples)
+    xs = [sample[0] for sample in controller._samples]
+    ys = [sample[1] for sample in controller._samples]
+    zs = [sample[2] for sample in controller._samples]
+    controller._min = [min(xs), min(ys), min(zs)]
+    controller._max = [max(xs), max(ys), max(zs)]
+    controller.observe("sensor_imu", {"magX": planar_samples[-1][0], "magY": planar_samples[-1][1], "magZ": planar_samples[-1][2]})
+    assert sent, "controller did not apply hard-iron fallback on timeout"
+    cmd, data = sent[-1]
+    assert cmd == "sensor_mag_cal_cmd"
+    assert data["command"] == 4
+    assert data["softIronMatrix"] == list((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+
     print("PASS: mag calibration fit")
 
 

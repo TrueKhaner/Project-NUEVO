@@ -7,6 +7,9 @@ Source hierarchy:
 - Numeric type IDs: [`TLV_TypeDefs.json`](./TLV_TypeDefs.json)
 - Firmware wire structs: [`firmware/arduino/src/messages/TLV_Payloads.h`](../firmware/arduino/src/messages/TLV_Payloads.h)
 
+This file owns exact payload layout and byte size. It should not duplicate the
+higher-level behavioral rules from [`docs/COMMUNICATION_PROTOCOL.md`](../docs/COMMUNICATION_PROTOCOL.md).
+
 All payloads are tightly packed and little-endian.
 
 ## Conventions
@@ -57,7 +60,7 @@ All payloads are tightly packed and little-endian.
 
 ### `SYS_INFO_RSP = 5` ↑
 
-`PayloadSysInfoRsp` — 20 bytes
+`PayloadSysInfoRsp` — 24 bytes
 
 | Field | Type | Notes |
 |---|---|---|
@@ -74,6 +77,7 @@ All payloads are tightly packed and little-endian.
 | `maxNeoPixelCount` | `u8` | Supported NeoPixel count |
 | `limitSwitchMask` | `u16` | Available limit-switch GPIO mask |
 | `stepperHomeLimitGpio[4]` | `u8[4]` | Home-limit GPIO mapping, `0xFF` = none |
+| `dcHomeLimitGpio[4]` | `u8[4]` | DC home-limit GPIO mapping, `0xFF` = none |
 
 ### `SYS_CONFIG_REQ = 6` ↓
 
@@ -114,7 +118,8 @@ All payloads are tightly packed and little-endian.
 | `batteryMv` | `u16` | Battery rail |
 | `rail5vMv` | `u16` | 5 V rail |
 | `servoRailMv` | `u16` | Servo rail |
-| `reserved` | `u16` | Reserved |
+| `batteryType` | `u8` | `BATTERY_TYPE` from firmware `config.h` |
+| `reserved` | `u8` | Reserved |
 | `timestamp` | `u32` | Measurement timestamp |
 
 ### `SYS_DIAG_REQ = 10` ↓
@@ -172,6 +177,24 @@ All payloads are tightly packed and little-endian.
 
 `PayloadDCSetPWM` — 4 bytes
 
+### `DC_RESET_POSITION = 24` ↓
+
+`PayloadDCResetPosition` — 4 bytes
+
+| Field | Type | Notes |
+|---|---|---|
+| `motorId` | `u8` | 0-based |
+
+### `DC_HOME = 25` ↓
+
+`PayloadDCHome` — 8 bytes
+
+| Field | Type | Notes |
+|---|---|---|
+| `motorId` | `u8` | 0-based |
+| `direction` | `i8` | `+1` or `-1` |
+| `homeVelocity` | `i32` | ticks/sec, `0 = firmware default` |
+
 ### `DC_STATE_ALL = 20` ↑
 
 `PayloadDCStateAll` — 92 bytes
@@ -188,6 +211,11 @@ Per-motor sub-struct `DCMotorState` — 22 bytes:
 | `targetVel` | `i32` |
 | `pwmOutput` | `i16` |
 | `currentMa` | `i16` |
+
+`faultFlags` bits:
+
+- `0x01` = home limit currently active
+- `0x02` = encoder fault latched
 
 Frame layout:
 
@@ -353,7 +381,7 @@ as `r,g,b` bytes.
 | 2 | `SYS_STATE` | ↑ | 12 |
 | 3 | `SYS_CMD` | ↓ | 4 |
 | 4 | `SYS_INFO_REQ` | ↓ | 4 |
-| 5 | `SYS_INFO_RSP` | ↑ | 20 |
+| 5 | `SYS_INFO_RSP` | ↑ | 24 |
 | 6 | `SYS_CONFIG_REQ` | ↓ | 4 |
 | 7 | `SYS_CONFIG_RSP` | ↑ | 8 |
 | 8 | `SYS_CONFIG_SET` | ↓ | 8 |
@@ -369,6 +397,8 @@ as `r,g,b` bytes.
 | 21 | `DC_PID_REQ` | ↓ | 4 |
 | 22 | `DC_PID_RSP` | ↑ | 24 |
 | 23 | `DC_PID_SET` | ↓ | 24 |
+| 24 | `DC_RESET_POSITION` | ↓ | 4 |
+| 25 | `DC_HOME` | ↓ | 8 |
 | 32 | `STEP_ENABLE` | ↓ | 4 |
 | 33 | `STEP_MOVE` | ↓ | 8 |
 | 34 | `STEP_HOME` | ↓ | 12 |

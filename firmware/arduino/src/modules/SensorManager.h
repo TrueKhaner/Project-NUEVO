@@ -6,7 +6,7 @@
  * dispatches work at three rates using an internal 0–9 counter:
  *
  *   update100Hz()  — every tick       → 100 Hz: alternating IMU read and
- *                                               Fusion/ultrasonic phases
+ *                                               Fusion phases
  *   update50Hz()   — even ticks       →  50 Hz: reserved medium-rate lane
  *   update10Hz()   — tick 0 only      →  10 Hz: Voltages
  *
@@ -19,7 +19,7 @@
  *  2. Add a member pointer/instance in the private section.
  *  3. Place the read call in update100Hz(), update50Hz(), or update10Hz()
  *     according to the sensor's required update rate.
- *  4. Expose the result via a getter (see getUltrasonicDistanceMm() as a model).
+ *  4. Expose the result via a getter.
  * ─────────────────────────────────────────────────────────────────────────
  *
  * Magnetometer Calibration State Machine
@@ -44,13 +44,9 @@
 #include <stdint.h>
 #include "../config.h"
 #include "../drivers/IMUDriver.h"
-#include "../drivers/UltrasonicDriver.h"
 #include "../lib/Fusion/FusionWrapper.h"
 #include "../messages/TLV_Payloads.h"
 #include "PersistentStorage.h"
-
-// Maximum number of range sensors of each type (must match config.h defines)
-#define SENSOR_MAX_ULTRASONICS  4
 
 struct MagCalData {
     MagCalState state;
@@ -71,7 +67,7 @@ public:
     /**
      * @brief Initialize all enabled sensors
      *
-     * Initializes I2C, IMU, ultrasonic sensor(s), and reads initial voltages.
+     * Initializes I2C, IMU, and reads initial voltages.
      * Loads magnetometer calibration from EEPROM if available.
      * Call once in setup() before using any sensors.
      */
@@ -82,7 +78,7 @@ public:
      *
      * Dispatches sensor reads at three rates using an internal 0–9 counter:
      *   - update100Hz()  every call       (100 Hz) — alternating IMU read and
-     *                                                 Fusion/ultrasonic phases
+     *                                                 Fusion phases
      *   - update50Hz()   every 2nd call   ( 50 Hz) — reserved medium-rate lane
      *   - update10Hz()   every 10th call  ( 10 Hz) — Voltages
      *
@@ -145,47 +141,12 @@ public:
     static int16_t getRawMagZ();
     static int16_t getRawTempDeciC();
 
-    // ========================================================================
-    // RANGE SENSORS
-    // ========================================================================
-
     /**
-     * @brief Get number of ultrasonic sensors that responded during init
-     */
-    static uint8_t getUltrasonicCount() { return ultrasonicCount_; }
-
-    /**
-     * @brief True if the sensor at this slot responded during init.
+     * @brief Sensor timing stats for debug/status reporting.
      *
-     * A sensor may be configured but absent on the I2C bus.
-     * Use this to distinguish "configured but missing" from "not configured".
+     * These timings measure only the IMU sub-lane, not the full 100 Hz sensor
+     * task wrapper.
      */
-    static bool isUltrasonicFound(uint8_t idx);
-
-    /**
-     * @brief Number of sensor slots enabled at compile time (from config.h).
-     *
-     * Compare with getUltrasonicCount() to detect missing sensors:
-     *   missing = getUltrasonicConfiguredCount() - getUltrasonicCount()
-     */
-    static uint8_t getUltrasonicConfiguredCount();
-
-    /**
-     * @brief Get latest ultrasonic distance reading
-     *
-     * @param idx Slot index (0-based). Returns 0 if slot not found or out of range.
-     */
-    static uint16_t getUltrasonicDistanceMm(uint8_t idx);
-
-    /**
-     * @brief Range-sensor timing stats for debug/status reporting.
-     *
-     * These timings measure only the ultrasonic read loop, not the full
-     * 100 Hz sensor task wrapper.
-     */
-    static uint16_t getUltrasonicTimingAvgUs() { return ultrasonicTimingAvgUs_; }
-    static uint16_t getUltrasonicTimingPeakUs() { return ultrasonicTimingPeakUs_; }
-    static uint16_t getUltrasonicTimingMaxUs() { return ultrasonicTimingMaxUs_; }
     static uint16_t getImuTimingAvgUs() { return imuTimingAvgUs_; }
     static uint16_t getImuTimingPeakUs() { return imuTimingPeakUs_; }
     static uint16_t getImuTimingMaxUs() { return imuTimingMaxUs_; }
@@ -287,15 +248,6 @@ private:
     static uint16_t imuTimingAvgUs_;
     static uint16_t imuTimingPeakUs_;
     static uint16_t imuTimingMaxUs_;
-
-    // ---- Range sensors ----
-    static UltrasonicDriver ultrasonics_[SENSOR_MAX_ULTRASONICS];
-    static uint8_t          ultrasonicCount_;   // # that responded during init
-    static bool             ultrasonicFound_[SENSOR_MAX_ULTRASONICS]; // per-slot init result
-    static uint16_t         ultrasonicDistMm_[SENSOR_MAX_ULTRASONICS];
-    static uint16_t         ultrasonicTimingAvgUs_;
-    static uint16_t         ultrasonicTimingPeakUs_;
-    static uint16_t         ultrasonicTimingMaxUs_;
 
     // ---- Voltages ----
     static float batteryVoltage_;

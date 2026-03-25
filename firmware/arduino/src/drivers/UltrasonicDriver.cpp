@@ -4,10 +4,16 @@
  */
 
 #include "UltrasonicDriver.h"
+#include "../modules/DebugLog.h"
 
 UltrasonicDriver::UltrasonicDriver()
     : connected_(false)
     , i2cAddr_(0x2F)
+    , consecutiveFailures_(0)
+    , nextAttemptMs_(0)
+    , lastLogMs_(0)
+    , zeroDistanceCount_(0)
+    , lastDistanceMm_(0)
 {
 }
 
@@ -17,21 +23,24 @@ bool UltrasonicDriver::init(uint8_t i2cAddr) {
     Wire.setClock(ULTRASONIC_I2C_CLOCK_HZ);
 
     if (!ultrasonic_.begin(i2cAddr_)) {
-#ifdef DEBUG_SENSOR
-        DEBUG_SERIAL.print(F("[Ultrasonic] Not found at 0x"));
-        DEBUG_SERIAL.println(i2cAddr_, HEX);
-#endif
+        Wire.setClock(I2C_BUS_CLOCK_HZ);
+        DebugLog::printf_P(PSTR("[ULTRA] addr=0x%02X init fail\n"), i2cAddr_);
         connected_ = false;
+        consecutiveFailures_ = kFailureThreshold;
+        nextAttemptMs_ = millis() + kReconnectBackoffMs;
         return false;
     }
 
+    bool wasDisconnected = !connected_;
     connected_ = true;
+    consecutiveFailures_ = 0;
+    nextAttemptMs_ = 0;
+    zeroDistanceCount_ = 0;
     Wire.setClock(I2C_BUS_CLOCK_HZ);
 
-#ifdef DEBUG_SENSOR
-    DEBUG_SERIAL.print(F("[Ultrasonic] Connected at 0x"));
-    DEBUG_SERIAL.println(i2cAddr_, HEX);
-#endif
+    if (wasDisconnected) {
+        DebugLog::printf_P(PSTR("[ULTRA] addr=0x%02X connected\n"), i2cAddr_);
+    }
 
     return true;
 #else
@@ -42,18 +51,71 @@ bool UltrasonicDriver::init(uint8_t i2cAddr) {
 
 uint16_t UltrasonicDriver::getDistanceMm() {
 #if ULTRASONIC_COUNT > 0
-    if (!connected_) return ULTRASONIC_ERROR_DISTANCE;
+    uint32_t now = millis();
+
+    if (now < nextAttemptMs_) {
+        return ULTRASONIC_ERROR_DISTANCE;
+    }
+
+    if (!connected_) {
+        if (!init(i2cAddr_)) {
+            nextAttemptMs_ = now + kReconnectBackoffMs;
+            return ULTRASONIC_ERROR_DISTANCE;
+        }
+    }
+
     Wire.setClock(ULTRASONIC_I2C_CLOCK_HZ);
 
     uint16_t distance = 0;
 
     // triggerAndRead() returns sfTkError_t; 0 (ksfTkErrOk) means success
-    if (ultrasonic_.triggerAndRead(distance) != 0) {
+    uint8_t err = (uint8_t)ultrasonic_.triggerAndRead(distance);
+    if (err != 0U) {
         Wire.setClock(I2C_BUS_CLOCK_HZ);
+        if (consecutiveFailures_ < 0xFFU) {
+            consecutiveFailures_++;
+        }
+        if ((uint32_t)(now - lastLogMs_) >= 500U) {
+            DebugLog::printf_P(PSTR("[ULTRA] addr=0x%02X read err=%u dist=%u fail=%u\n"),
+                               i2cAddr_,
+                               (unsigned)err,
+                               (unsigned)distance,
+                               (unsigned)consecutiveFailures_);
+            lastLogMs_ = now;
+        }
+        if (consecutiveFailures_ >= kFailureThreshold) {
+            connected_ = false;
+            nextAttemptMs_ = now + kReconnectBackoffMs;
+            DebugLog::printf_P(PSTR("[ULTRA] addr=0x%02X offline\n"), i2cAddr_);
+        } else {
+            nextAttemptMs_ = now + kRetryBackoffMs;
+        }
         return ULTRASONIC_ERROR_DISTANCE;
     }
 
     Wire.setClock(I2C_BUS_CLOCK_HZ);
+
+    if (distance == 0U) {
+        zeroDistanceCount_++;
+        if ((uint32_t)(now - lastLogMs_) >= 500U) {
+            DebugLog::printf_P(PSTR("[ULTRA] addr=0x%02X zero dist=%u zero=%u last=%u\n"),
+                               i2cAddr_,
+                               (unsigned)distance,
+                               (unsigned)zeroDistanceCount_,
+                               (unsigned)lastDistanceMm_);
+            lastLogMs_ = now;
+        }
+        consecutiveFailures_ = 0;
+        nextAttemptMs_ = 0;
+        connected_ = true;
+        return lastDistanceMm_;
+    }
+
+    connected_ = true;
+    consecutiveFailures_ = 0;
+    nextAttemptMs_ = 0;
+    zeroDistanceCount_ = 0;
+    lastDistanceMm_ = distance;
 
     // The library already returns mm; 0 indicates a sensor error
     return distance;

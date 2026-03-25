@@ -4,6 +4,7 @@
  */
 
 #include "EncoderCounter.h"
+#include <util/atomic.h>
 
 // ============================================================================
 // 2X RESOLUTION ENCODER IMPLEMENTATION
@@ -43,8 +44,18 @@ void EncoderCounter2x::init(uint8_t pinA, uint8_t pinB, bool invertDir) {
 }
 
 int32_t EncoderCounter2x::getCount() const {
-    // Reading 32-bit volatile is atomic on AVR
-    return count_;
+    int32_t value;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        value = count_;
+    }
+    return value;
+}
+
+void EncoderCounter2x::snapshot(int32_t &count, uint32_t &lastEdgeUs) const {
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        count = count_;
+        lastEdgeUs = lastEdgeUs_;
+    }
 }
 
 void EncoderCounter2x::resetCount() {
@@ -84,6 +95,7 @@ void EncoderCounter2x::onInterruptA() {
 
     // Apply direction with inversion flag
     count_ += invertDir_ ? (forward ? -1 : 1) : (forward ? 1 : -1);
+    lastEdgeUs_ = micros();
 
 }
 
@@ -143,7 +155,18 @@ void EncoderCounter4x::init(uint8_t pinA, uint8_t pinB, bool invertDir) {
 }
 
 int32_t EncoderCounter4x::getCount() const {
-    return count_;
+    int32_t value;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        value = count_;
+    }
+    return value;
+}
+
+void EncoderCounter4x::snapshot(int32_t &count, uint32_t &lastEdgeUs) const {
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        count = count_;
+        lastEdgeUs = lastEdgeUs_;
+    }
 }
 
 void EncoderCounter4x::resetCount() {
@@ -214,6 +237,9 @@ void EncoderCounter4x::processEdge() {
 
     // Apply direction with inversion flag
     count_ += invertDir_ ? -delta : delta;
+    if (delta != 0) {
+        lastEdgeUs_ = micros();
+    }
 
     prevState_ = currState;
 }

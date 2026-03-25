@@ -138,8 +138,9 @@ struct PayloadSysInfoRsp {
     uint8_t  maxNeoPixelCount;
     uint16_t limitSwitchMask;
     uint8_t  stepperHomeLimitGpio[TLV_MAX_STEPPERS];
+    uint8_t  dcHomeLimitGpio[TLV_MAX_DC_MOTORS];
 };
-// 20 bytes
+// 24 bytes
 
 struct PayloadSysConfigReq {
     uint8_t target;       // Reserved for future use; send 0xFF
@@ -171,7 +172,8 @@ struct PayloadSysPower {
     uint16_t batteryMv;
     uint16_t rail5vMv;
     uint16_t servoRailMv;
-    uint16_t reserved;
+    uint8_t  batteryType;  // BATTERY_TYPE from config.h
+    uint8_t  reserved;
     uint32_t timestamp;
 };
 // 12 bytes
@@ -212,6 +214,7 @@ enum DCMotorMode : uint8_t {
     DC_MODE_POSITION = 1,
     DC_MODE_VELOCITY = 2,
     DC_MODE_PWM      = 3,
+    DC_MODE_HOMING   = 4,
 };
 
 enum DCPidLoopType : uint8_t {
@@ -247,6 +250,20 @@ struct PayloadDCSetPWM {
     int16_t pwm;
 };
 // 4 bytes
+
+struct PayloadDCResetPosition {
+    uint8_t motorId;
+    uint8_t reserved[3];
+};
+// 4 bytes
+
+struct PayloadDCHome {
+    uint8_t motorId;
+    int8_t  direction;     // +1 or -1
+    uint8_t reserved[2];
+    int32_t homeVelocity;  // ticks/sec magnitude; 0 = use firmware default
+};
+// 8 bytes
 
 struct DCMotorState {
     uint8_t mode;         // DCMotorMode
@@ -558,7 +575,7 @@ STATIC_ASSERT_SIZE(PayloadHeartbeat, 5);
 STATIC_ASSERT_SIZE(PayloadSysState, 12);
 STATIC_ASSERT_SIZE(PayloadSysCmd, 4);
 STATIC_ASSERT_SIZE(PayloadSysInfoReq, 4);
-STATIC_ASSERT_SIZE(PayloadSysInfoRsp, 20);
+STATIC_ASSERT_SIZE(PayloadSysInfoRsp, 24);
 STATIC_ASSERT_SIZE(PayloadSysConfigReq, 4);
 STATIC_ASSERT_SIZE(PayloadSysConfigRsp, 8);
 STATIC_ASSERT_SIZE(PayloadSysConfigSet, 8);
@@ -571,6 +588,8 @@ STATIC_ASSERT_SIZE(PayloadDCEnable, 4);
 STATIC_ASSERT_SIZE(PayloadDCSetPosition, 12);
 STATIC_ASSERT_SIZE(PayloadDCSetVelocity, 8);
 STATIC_ASSERT_SIZE(PayloadDCSetPWM, 4);
+STATIC_ASSERT_SIZE(PayloadDCResetPosition, 4);
+STATIC_ASSERT_SIZE(PayloadDCHome, 8);
 STATIC_ASSERT_SIZE(DCMotorState, 22);
 STATIC_ASSERT_SIZE(PayloadDCStateAll, 92);
 STATIC_ASSERT_SIZE(PayloadDCPidReq, 4);

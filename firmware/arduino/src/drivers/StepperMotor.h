@@ -244,7 +244,7 @@ public:
      *
      * @return Speed in steps/second
      */
-    uint32_t getCurrentSpeed() const { return (uint32_t)currentVelocity_; }
+    uint32_t getCurrentSpeed() const;
 
     /**
      * @brief Check the configured home/limit input state.

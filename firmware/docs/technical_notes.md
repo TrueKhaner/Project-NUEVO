@@ -1,6 +1,6 @@
 # Firmware Technical Notes
 
-This document captures the low-level constraints and design choices behind the current `v0.9.5` firmware profile.
+This document captures the low-level constraints and design choices behind the firmware.
 
 Use this together with:
 
@@ -28,7 +28,7 @@ Important limits that shape the firmware:
 | `Timer1` | `800 Hz` DC round-robin overflow ISR | short latch/apply slice only |
 | `Timer2` | available / driver-local PWM usage | not central to system timing |
 | `Timer3` | `10 kHz` stepper overflow ISR + OC3A hardware PWM use where mapped | also samples UART2 fault edges in the ISR |
-| `Timer4` | PWM carrier only | no overflow ISR in the production profile |
+| `Timer4` | PWM carrier only | no overflow ISR in the runtime design |
 | `Timer5` | discrete LED PWM pins | normal hardware PWM use |
 
 `analogWrite()` is avoided on Timer1/3/4-owned outputs because it can reconfigure timer modes and break the intended timing setup.
@@ -37,10 +37,16 @@ Important limits that shape the firmware:
 
 The Raspberry Pi link runs at the baud rate configured in [`arduino/src/config.h`](../arduino/src/config.h).
 
-The current profile relies on two ideas:
+The runtime relies on two ideas:
 
 1. keep ISR bodies short enough that RX overrun is rare
 2. keep RX/TX draining in the fast loop path instead of moving UART work into control ISRs
+
+The tuned link profile is:
+
+- `RPI_BAUD_RATE = 200000`
+- `taskUART() = 100 Hz`
+- telemetry spread across a 10-slot scheduler wheel instead of bunching all due streams into the same UART pass
 
 `LoopMonitor` budgets are set conservatively for ISR slices:
 
@@ -58,6 +64,12 @@ These are budget checks, not proof of link integrity. Real UART health still com
 
 reported by `MessageCenter` / `StatusReporter`.
 
+The lightweight USB fault-event logger now reports:
+
+- loop-overrun deltas by slot name
+- control handoff deltas (`miss`, `late`, `reuse`, `cross`)
+- UART deltas including `oversize` explicitly
+
 ## Mixed DC Control Timing
 
 ### Slot timing
@@ -71,13 +83,13 @@ With four motors, that gives `200 Hz` per motor.
 
 ### Pipeline model
 
-The current DC path is a fixed one-round pipeline:
+The current DC path uses a per-slot mixed round-robin pipeline:
 
-- Timer1 slot `0` publishes outputs for round `N`
-- the loop computes outputs for round `N+1`
-- Timer1 slot `0` of the next round publishes those staged outputs
+- Timer1 services one motor slot every `1.25 ms`
+- the loop computes the matching motor for that slot
+- the next time that same motor returns `5 ms` later, its staged output is published
 
-This trades a fixed one-round delay for much lower handoff jitter.
+This keeps each motor at `200 Hz` while avoiding a large four-motor compute burst in the loop.
 
 ### What the timing fields mean
 
@@ -114,7 +126,7 @@ Rule of thumb:
 - about `30 us` per RGB pixel
 - plus the frame latch/reset time
 
-That makes multi-pixel WS2812 animation a bad fit for this firmware. The supported `v0.9.5` profile is:
+That makes multi-pixel WS2812 animation a bad fit for this firmware. The supported WS2812 runtime is:
 
 - one pixel
 - infrequent updates
@@ -182,12 +194,3 @@ Recommended approach:
 
 1. keep the reporter on during bring-up and soak testing
 2. reduce report frequency or disable it for production-like runs if needed
-
-## Historical Notes
-
-Two historical documents are retained because they explain board-level decisions that still matter:
-
-- [`REV_A_TO_REV_B_CHANGES.md`](REV_A_TO_REV_B_CHANGES.md)
-- [`TIMER3_CONFLICT_ANALYSIS.md`](TIMER3_CONFLICT_ANALYSIS.md)
-
-Older implementation plans and oscilloscope procedures were removed from the active doc set because they described superseded architectures.

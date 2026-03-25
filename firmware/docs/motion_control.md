@@ -1,14 +1,10 @@
 # Motion Control Implementation
 
-This document describes how DC motors, steppers, encoders, odometry, and servos are implemented in the current firmware.
+This document describes how DC motors, steppers, encoders, odometry, and servos are implemented.
 
 ## 1. DC Motor Control: Mixed ISR + Loop Round-Robin
 
 The DC motor path is intentionally split between Timer1 ISR work and loop-side compute.
-
-### Why this exists
-
-Earlier firmware versions placed too much control work in ISR context, which caused UART timing failures and RX overruns. The current design keeps the ISR short and moves the heavy math into the loop.
 
 ### Timer1 rate and slot model
 
@@ -44,7 +40,7 @@ The fast lane calls `fastMotorCompute()`, which calls `taskMotors()` whenever
 `taskMotors()` now computes exactly one motor per invocation and stages the next
 output for that same motor only. If a small backlog exists, it may compute a
 few pending motor slots in one pass, but only within a bounded wall-clock
-budget so the loop does not regress to the old 4-motor batch behavior.
+budget.
 
 So the pipeline is:
 
@@ -53,8 +49,7 @@ So the pipeline is:
 - loop computes motor `i`
 - the next time motor `i` returns `5 ms` later, its staged output is published
 
-This keeps each motor at `200 Hz`, but removes the earlier 4-motor batch
-compute deadline from the loop.
+This keeps each motor at `200 Hz` while avoiding large bursty loop-side compute.
 
 ## 2. `MotorControlCoordinator`
 
@@ -90,7 +85,7 @@ Each `DCMotor` object owns one physical motor channel.
 
 - keep track of its pins
 - read encoder position via an `IEncoderCounter`
-- estimate velocity using a `IVelocityEstimator`
+- maintain a simple fixed-rate encoder velocity estimate
 - run cascade position/velocity control
 - stage and publish H-bridge outputs
 - detect basic encoder-stuck / feedback failure conditions
@@ -102,36 +97,58 @@ Supported modes:
 - `DC_MODE_DISABLED`
 - `DC_MODE_POSITION`
 - `DC_MODE_VELOCITY`
-- direct PWM command path
+- `DC_MODE_PWM`
+- `DC_MODE_HOMING`
 
-### Two-part update model
+Additional DC actuator actions:
 
-`DCMotor` is split across two methods:
+- `resetPosition()`
+  - resets the encoder baseline to a specific count (the UI currently uses zero)
+  - preserves the active mode unless a later command changes it
+- `home(direction, homeVelocity)`
+  - drives the motor toward its configured home limit
+  - when the limit triggers, the encoder count is reset to zero and the motor is disabled
 
+Optional DC home limits are configured in `config.h` with:
+
+- `PIN_M1_LIMIT`
+- `PIN_M2_LIMIT`
+- `PIN_M3_LIMIT`
+- `PIN_M4_LIMIT`
+
+They use the same `LIMIT_ACTIVE_LOW` policy as stepper home switches.
+
+### Feedback and control update model
+
+`DCMotor` is split across three loop/ISR paths:
+
+- `refreshFeedback()`
+  - loop-side shared feedback refresh at `200 Hz`
+  - updates cached position / velocity for every motor
 - `service()`
   - loop-side control compute
-  - reads latched encoder feedback
+  - reads cached encoder feedback
   - runs fixed-point PID math
   - prepares `stagedDuty_` / `stagedDrive_`
 - `update()`
   - ISR-side apply
   - writes already-prepared drive state to the H-bridge output pins / OCR register
 
-This split is the main reason the current DC path fits within the UART-safe ISR budget.
+This split is the main reason the current DC path fits within the UART-safe ISR budget while still keeping disabled-motor telemetry and odometry live.
 
 ### Current-sense note
 
-The driver still contains optional current-sense support, but the active
-`v0.9.5` control profile has `DC_CURRENT_SENSE_ENABLED = 0`, so the loop-side
+The driver still contains optional current-sense support, but
+`DC_CURRENT_SENSE_ENABLED = 0`, so the loop-side
 motor service path does not spend ADC time sampling CT pins.
 
 ### Fixed-point control implementation
 
 The current control path uses a Q16 fixed-point implementation for the hot control logic.
 
-That choice reduces floating-point cost in the control loop and keeps `service()` predictable on AVR. The older float PID helper remains in the file, but the main active path uses the fixed-point fields and helper routines.
+That choice reduces floating-point cost in the control loop and keeps `service()` predictable on AVR. The main active path uses the fixed-point fields and helper routines.
 
-## 4. Encoders and Velocity Estimation
+## 4. Encoders and Velocity Feedback
 
 ### Encoder counters
 
@@ -145,15 +162,18 @@ That mapping is configured in `ISRScheduler`.
 The encoder back-end is intentionally minimal:
 
 - count edges
-- provide count snapshots
+- provide atomic count/timestamp snapshots
+- allow explicit encoder re-zeroing
 
-Earlier expensive ISR behavior, such as per-edge timestamp work, was removed because it contributed to UART timing failures.
+Velocity is now computed by the DC motor path itself at a fixed `200 Hz` refresh rate using the latest encoder count plus real encoder-edge timing, followed by a small low-pass filter. The same cached velocity is then consumed by:
 
-### Velocity estimator
+- the PID control path
+- `DC_STATE_ALL` telemetry
+- differential-drive odometry
 
-Velocity estimation is handled by separate estimator objects attached to each `DCMotor`.
-
-This lets encoder counting stay simple while the motor driver owns the control-side interpretation of that feedback.
+Zero detection uses the real timestamp of the last encoder edge, not scheduler
+tick timing, so low-speed motion remains observable while still allowing the
+estimate to settle cleanly to zero after motion stops.
 
 ## 5. Stepper Control
 
@@ -187,6 +207,12 @@ Each stepper channel owns:
 - target motion state
 - pulse generation state
 - homing / limit logic
+
+The Timer3 hot path is trimmed to keep the stepper ISR small:
+
+- `timerCallback()` no longer recomputes `currentVelocity_` with an integer divide on every emitted step
+- the current stepper speed is now derived lazily from `stepInterval_` when status is queried
+- the stop-interval constant is precomputed instead of recalculated in the deceleration ISR path
 
 Stepper limit checks for homing are read directly in the stepper path, not through the slower `UserIO` cache. That is why the general input sampling cadence does not limit homing responsiveness.
 
@@ -241,6 +267,16 @@ It updates from:
 
 - left/right encoder tick counts
 - left/right motor velocity estimates
+
+Current odometry behavior:
+
+- heading resets to `INITIAL_THETA` from `RobotKinematics.h`
+- `ODOM_LEFT_MOTOR_DIR_INVERTED` and `ODOM_RIGHT_MOTOR_DIR_INVERTED` apply to
+  both encoder deltas and wheel velocities
+- `RobotKinematics::reseed()` preserves pose while updating the encoder
+  baseline after an odometry-wheel encoder is explicitly re-zeroed
+- kinematics telemetry remains available in `IDLE`, so odometry reset does not
+  depend on motor enable state
 
 This module is used for telemetry and UI state, not for the low-level control loops.
 

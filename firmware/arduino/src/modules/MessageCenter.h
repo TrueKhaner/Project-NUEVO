@@ -25,7 +25,7 @@
  * Usage:
  *   MessageCenter::init();
  *
- *   // In scheduler task @ 50Hz:
+ *   // In scheduler task @ 100Hz:
  *   MessageCenter::processIncoming();
  *   MessageCenter::sendTelemetry();
  */
@@ -56,7 +56,7 @@
 // RX_MAX_FRAME_ACCEPT_SIZE, so keeping larger backing arrays just wastes SRAM.
 #define RX_BUFFER_SIZE RX_MAX_FRAME_ACCEPT_SIZE
 // Keep RUNNING telemetry frames small enough that one frame does not occupy the
-// UART for an entire 20 ms task period. Large multi-TLV bursts were driving the
+// UART for an entire 10 ms task period. Large multi-TLV bursts were driving the
 // queued TX length near 500 bytes and correlating with heartbeat loss.
 #define TX_BUFFER_SIZE 256
 // Prefer smaller telemetry frames so lower-priority updates defer to later
@@ -112,8 +112,8 @@ public:
      * @brief Process incoming messages from UART
      *
      * drainUart() already feeds bytes into the decoder continuously. This task
-     * keeps the heartbeat timeout logic on a predictable 50 Hz cadence.
-     * Should be called from the scheduler at 50 Hz.
+     * keeps the heartbeat timeout logic on a predictable 100 Hz cadence.
+     * Should be called from the scheduler at 100 Hz.
      */
     static void processIncoming();
 
@@ -136,7 +136,7 @@ public:
      * TELEMETRY_*_MS configuration values. Immediate command acknowledgements
      * and status refreshes can still bypass the periodic cadence.
      *
-     * Should be called from the 50 Hz UART task.
+     * Should be called from the 100 Hz UART task.
      */
     static void sendTelemetry();
 
@@ -291,7 +291,7 @@ private:
     static uint32_t lastIOOutputStateSendMs_;
     static uint32_t lastSysStateSendMs_;
     static uint32_t lastMagCalSendMs_;
-    static uint32_t lastUltrasonicAllSendMs_;
+    static uint8_t telemetrySlot_;
 
     // ---- Queued async response ----
     // Set by handleMagCalCmd on STOP/SAVE/APPLY/CLEAR so the response is
@@ -397,6 +397,8 @@ private:
     static void handleDCSetPosition(const PayloadDCSetPosition *payload);
     static void handleDCSetVelocity(const PayloadDCSetVelocity *payload);
     static void handleDCSetPWM(const PayloadDCSetPWM *payload);
+    static void handleDCResetPosition(const PayloadDCResetPosition *payload);
+    static void handleDCHome(const PayloadDCHome *payload);
 
     // ---- Stepper motor message handlers ----
     static void handleDCPidReq(const PayloadDCPidReq *payload);
@@ -467,9 +469,6 @@ private:
 
     /** @brief Append magnetometer calibration progress (44 bytes payload) */
     static void sendMagCalStatus();
-
-    /** @brief Append bundled ultrasonic state for all configured slots */
-    static void sendUltrasonicAll();
 
     /** @brief Append DC PID loop configuration in response to DC_PID_REQ */
     static void sendDCPidRsp(uint8_t motorId, uint8_t loopType);

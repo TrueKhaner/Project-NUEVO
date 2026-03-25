@@ -51,19 +51,29 @@ public:
     /**
      * @brief Trigger a measurement and read the distance
      *
-     * Ultrasonic sensors have a maximum update rate of ~15 Hz due to sound travel
-     * time. Calling faster than this will return stale or incorrect readings.
+     * Ultrasonic sensors have a practical maximum update rate of ~15 Hz due to
+     * sound travel time and device firmware latency. Calling faster than this
+     * can return stale data or cause bus-facing read failures.
      *
      * @return Distance in mm, or 0 if sensor error / out of range
      */
     uint16_t getDistanceMm();
 
 private:
+    static constexpr uint8_t kFailureThreshold = 2;
+    static constexpr uint16_t kRetryBackoffMs = 150;
+    static constexpr uint16_t kReconnectBackoffMs = 500;
+
 #if ULTRASONIC_COUNT > 0
     QwiicUltrasonic ultrasonic_;
 #endif
     bool connected_;
     uint8_t i2cAddr_;
+    uint8_t consecutiveFailures_;
+    uint32_t nextAttemptMs_;
+    uint32_t lastLogMs_;
+    uint8_t zeroDistanceCount_;
+    uint16_t lastDistanceMm_;
 };
 
 #endif // ULTRASONICDRIVER_H

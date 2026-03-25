@@ -28,6 +28,18 @@ inline int32_t countsPerTickToQ16(int32_t deltaCount) {
     return (int32_t)velQ16;
 }
 
+inline int32_t countsPerElapsedUsToQ16(int32_t deltaCount, uint32_t elapsedUs) {
+    if (elapsedUs == 0U) {
+        return 0;
+    }
+
+    int64_t velQ16 = (int64_t)deltaCount * 1000000LL * (int64_t)Q16_ONE;
+    velQ16 /= (int64_t)elapsedUs;
+    if (velQ16 > INT32_MAX) return INT32_MAX;
+    if (velQ16 < INT32_MIN) return INT32_MIN;
+    return (int32_t)velQ16;
+}
+
 inline int32_t pidStepQ16(int32_t &iAccQ16,
                           int32_t &prevErrQ16,
                           int32_t kpQ16,
@@ -117,8 +129,11 @@ DCMotor::DCMotor()
     , pinIN1_(0)
     , pinIN2_(0)
     , pinCT_(0)
+    , pinLimit_(0)
+    , limitActiveState_(LOW)
     , invertDir_(false)
     , hasCurrentSense_(false)
+    , hasLimit_(false)
     , mode_(DC_MODE_DISABLED)
     , targetPosition_(0)
     , targetVelocity_(0.0f)
@@ -127,7 +142,6 @@ DCMotor::DCMotor()
     , currentMa_(-1)
     , maPerVolt_(1000.0f)
     , encoder_(nullptr)
-    , velocityEst_(nullptr)
     , targetVelocityQ16_(0)
     , feedbackVelocityQ16_(0)
     , latchedPosition_(0)
@@ -149,22 +163,25 @@ DCMotor::DCMotor()
     , velIAccQ16_(0)
     , velPrevErrQ16_(0)
     , prevPosition_(0)
+    , prevEdgeUs_(0)
     , feedbackSeeded_(false)
     , in1OutReg_(nullptr)
     , in2OutReg_(nullptr)
+    , limitInReg_(nullptr)
     , in1Mask_(0)
     , in2Mask_(0)
+    , limitMask_(0)
     , encoderFailed_(false)
     , lastCheckedPos_(0)
     , stuckStartMs_(0)
     , stuckTracking_(false)
+    , encoderResetEvent_(false)
 {
 }
 
-void DCMotor::init(uint8_t motorId, IEncoderCounter *encoder, IVelocityEstimator *velocityEst, bool invertDir) {
+void DCMotor::init(uint8_t motorId, IEncoderCounter *encoder, bool invertDir) {
     motorId_ = motorId;
     encoder_ = encoder;
-    velocityEst_ = velocityEst;
     invertDir_ = invertDir;
 }
 
@@ -190,6 +207,21 @@ void DCMotor::setPins(uint8_t pinEN, uint8_t pinIN1, uint8_t pinIN2) {
     }
 }
 
+void DCMotor::setLimitPin(uint8_t pinLimit, uint8_t activeState) {
+    pinLimit_ = pinLimit;
+    limitActiveState_ = activeState;
+    hasLimit_ = true;
+
+    if (activeState == LOW) {
+        pinMode(pinLimit_, INPUT_PULLUP);
+    } else {
+        pinMode(pinLimit_, INPUT);
+    }
+
+    limitInReg_ = portInputRegister(digitalPinToPort(pinLimit_));
+    limitMask_ = digitalPinToBitMask(pinLimit_);
+}
+
 void DCMotor::setCurrentPin(uint8_t pinCT, float maPerVolt) {
     pinCT_ = pinCT;
     maPerVolt_ = maPerVolt;
@@ -201,19 +233,12 @@ void DCMotor::enable(DCMotorMode mode) {
     positionPID_.reset();
     velocityPID_.reset();
 
-    if (velocityEst_) {
-        velocityEst_->reset();
-    }
-
     encoderFailed_ = false;
     stuckTracking_ = false;
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         mode_ = mode;
         targetVelocityQ16_ = floatToQ16(targetVelocity_);
-        feedbackVelocityQ16_ = 0;
-        latchedPosition_ = 0;
-        positionLatched_ = false;
         pendingPwm_ = 0;
         pendingDuty_ = 0;
         pendingDrive_ = 0;
@@ -224,8 +249,6 @@ void DCMotor::enable(DCMotorMode mode) {
         posPrevErrQ16_ = 0;
         velIAccQ16_ = 0;
         velPrevErrQ16_ = 0;
-        prevPosition_ = 0;
-        feedbackSeeded_ = false;
     }
 
 #ifdef DEBUG_MOTOR_CONTROL
@@ -237,8 +260,17 @@ void DCMotor::enable(DCMotorMode mode) {
 }
 
 void DCMotor::disable() {
+    int32_t holdPosition = 0;
+    if (encoder_) {
+        holdPosition = encoder_->getCount();
+    }
+
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         mode_ = DC_MODE_DISABLED;
+        targetPosition_ = holdPosition;
+        targetVelocity_ = 0.0f;
+        targetVelocityQ16_ = 0;
+        directPwm_ = 0;
         pendingPwm_ = 0;
         pendingDuty_ = 0;
         pendingDrive_ = 0;
@@ -246,15 +278,10 @@ void DCMotor::disable() {
         stagedDuty_ = 0;
         stagedDrive_ = 0;
         pwmOutput_ = 0;
-        feedbackVelocityQ16_ = 0;
-        latchedPosition_ = 0;
-        positionLatched_ = false;
         posIAccQ16_ = 0;
         posPrevErrQ16_ = 0;
         velIAccQ16_ = 0;
         velPrevErrQ16_ = 0;
-        prevPosition_ = 0;
-        feedbackSeeded_ = false;
     }
     applyOutput(0, 0);
 
@@ -318,29 +345,67 @@ void DCMotor::setDirectPWM(int16_t pwm) {
     }
 }
 
+void DCMotor::resetPosition(int32_t position) {
+    if (encoder_) {
+        encoder_->setCount(position);
+    }
+
+    uint32_t lastEdgeUs = 0;
+    if (encoder_) {
+        lastEdgeUs = encoder_->getLastEdgeUs();
+    }
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        if (mode_ == DC_MODE_POSITION) {
+            targetPosition_ = position;
+        }
+        latchedPosition_ = position;
+        positionLatched_ = true;
+    }
+
+    prevPosition_ = position;
+    prevEdgeUs_ = lastEdgeUs;
+    feedbackSeeded_ = true;
+    encoderResetEvent_ = true;
+}
+
+void DCMotor::home(int8_t direction, int32_t homeVelocityTicksPerSec) {
+    if (!hasLimit_) {
+        return;
+    }
+
+    if (homeVelocityTicksPerSec <= 0) {
+        homeVelocityTicksPerSec = 200;
+    }
+
+    const int32_t signedVelocity = (direction >= 0) ? homeVelocityTicksPerSec : -homeVelocityTicksPerSec;
+    targetVelocity_ = (float)signedVelocity;
+
+    const int32_t currentPosition = getPosition();
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        mode_ = DC_MODE_HOMING;
+        targetVelocityQ16_ = floatToQ16((float)signedVelocity);
+        targetPosition_ = currentPosition;
+        directPwm_ = 0;
+        posIAccQ16_ = 0;
+        posPrevErrQ16_ = 0;
+        velIAccQ16_ = 0;
+        velPrevErrQ16_ = 0;
+    }
+}
+
 void DCMotor::service() {
     int32_t currentPosition = 0;
+    bool haveLatchedPosition = false;
 
     if (encoder_) {
         ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
             currentPosition = latchedPosition_;
+            haveLatchedPosition = positionLatched_;
         }
-
-        int32_t nextFeedbackQ16 = 0;
-        if (!feedbackSeeded_) {
-            prevPosition_ = currentPosition;
-            feedbackSeeded_ = true;
-        } else {
-            int32_t deltaCount = currentPosition - prevPosition_;
-            prevPosition_ = currentPosition;
-            int32_t instantVelocityQ16 = countsPerTickToQ16(deltaCount);
-            nextFeedbackQ16 = (feedbackVelocityQ16_ == 0)
-                                ? instantVelocityQ16
-                                : (int32_t)(((int64_t)feedbackVelocityQ16_ * 3 + instantVelocityQ16) / 4);
-        }
-
-        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-            feedbackVelocityQ16_ = nextFeedbackQ16;
+        if (!haveLatchedPosition) {
+            currentPosition = encoder_->getCount();
         }
     }
 
@@ -397,7 +462,37 @@ void DCMotor::service() {
 
     int16_t nextPwm = 0;
 
-    if (mode == DC_MODE_PWM) {
+    if (mode == DC_MODE_HOMING) {
+        if (isLimitTriggered()) {
+            resetPosition(0);
+            ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+                mode_ = DC_MODE_PWM;
+                targetPosition_ = 0;
+                targetVelocity_ = 0.0f;
+                targetVelocityQ16_ = 0;
+                directPwm_ = 0;
+                feedbackVelocityQ16_ = 0;
+                pendingPwm_ = 0;
+                pendingDuty_ = 0;
+                pendingDrive_ = 0;
+                stagedPwm_ = 0;
+                stagedDuty_ = 0;
+                stagedDrive_ = 0;
+                pwmOutput_ = 0;
+                posIAccQ16_ = 0;
+                posPrevErrQ16_ = 0;
+                velIAccQ16_ = 0;
+                velPrevErrQ16_ = 0;
+            }
+            return;
+        }
+
+        int32_t velErrQ16 = targetVelocityQ16 - feedbackVelocityQ16;
+        int32_t pwmQ16 = pidStepQ16(velIAccQ16_, velPrevErrQ16_,
+                                    velKpQ16_, velKiDtQ16_, velKdDivDtQ16_,
+                                    velErrQ16, -PWM_LIMIT_Q16, PWM_LIMIT_Q16);
+        nextPwm = (int16_t)(pwmQ16 >> 16);
+    } else if (mode == DC_MODE_PWM) {
         nextPwm = directPwm;
     } else if (mode != DC_MODE_DISABLED && encoder_) {
         int32_t velocitySetpointQ16 = targetVelocityQ16;
@@ -455,25 +550,69 @@ void DCMotor::publishStagedOutputISR() {
     pendingDrive_ = stagedDrive_;
 }
 
-int32_t DCMotor::getPosition() const {
-    int32_t position = 0;
-    bool haveLatchedPosition = false;
-
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        position = latchedPosition_;
-        haveLatchedPosition = positionLatched_;
+void DCMotor::refreshFeedback() {
+    if (encoder_ == nullptr) {
+        return;
     }
 
-    if (haveLatchedPosition) {
+    const uint32_t nowUs = micros();
+    int32_t currentPosition = 0;
+    uint32_t lastEdgeUs = 0;
+    encoder_->snapshot(currentPosition, lastEdgeUs);
+
+    if (!feedbackSeeded_) {
+        prevPosition_ = currentPosition;
+        prevEdgeUs_ = lastEdgeUs;
+        feedbackSeeded_ = true;
+        return;
+    }
+
+    const int32_t deltaCount = currentPosition - prevPosition_;
+
+    int32_t filteredVelocityQ16;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        filteredVelocityQ16 = feedbackVelocityQ16_;
+    }
+
+    if (deltaCount != 0 && lastEdgeUs != 0U && lastEdgeUs != prevEdgeUs_) {
+        const uint32_t edgeDtUs = lastEdgeUs - prevEdgeUs_;
+        const int32_t rawVelocityQ16 = countsPerElapsedUsToQ16(deltaCount, edgeDtUs);
+        const float filteredVelocity =
+            ((float)filteredVelocityQ16 / (float)Q16_ONE +
+             ((float)rawVelocityQ16 / (float)Q16_ONE) * VELOCITY_LOWPASS_CONST) /
+            (1.0f + VELOCITY_LOWPASS_CONST);
+        filteredVelocityQ16 = floatToQ16(filteredVelocity);
+        prevPosition_ = currentPosition;
+        prevEdgeUs_ = lastEdgeUs;
+    } else if (lastEdgeUs != 0U &&
+               (nowUs - lastEdgeUs) >= ((uint32_t)VELOCITY_ZERO_TIMEOUT * 1000UL)) {
+        filteredVelocityQ16 = 0;
+    }
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        feedbackVelocityQ16_ = filteredVelocityQ16;
+    }
+}
+
+bool DCMotor::consumeEncoderResetEvent() {
+    const bool hadEvent = encoderResetEvent_;
+    encoderResetEvent_ = false;
+    return hadEvent;
+}
+
+int32_t DCMotor::getPosition() const {
+    if (!encoder_) {
+        int32_t position = 0;
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            position = latchedPosition_;
+        }
         return position;
     }
-    if (!encoder_) {
-        return 0;
-    }
 
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        position = encoder_->getCount();
-    }
+    int32_t position = 0;
+    uint32_t lastEdgeUs = 0;
+    encoder_->snapshot(position, lastEdgeUs);
+    (void)lastEdgeUs;
     return position;
 }
 
@@ -584,4 +723,17 @@ void DCMotor::applyOutput(uint8_t drive, uint16_t duty) {
 #endif
 
     analogWrite(pinEN_, (uint8_t)duty);
+}
+
+bool DCMotor::isLimitTriggered() const {
+    if (!hasLimit_) {
+        return false;
+    }
+
+    if (limitInReg_) {
+        const bool pinHigh = ((*limitInReg_ & limitMask_) != 0U);
+        return pinHigh == (limitActiveState_ == HIGH);
+    }
+
+    return digitalRead(pinLimit_) == limitActiveState_;
 }

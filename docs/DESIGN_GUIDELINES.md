@@ -1,8 +1,17 @@
 # NUEVO Platform — Design Guidelines
 
-This document defines conventions that all sub-projects must follow. Its purpose is to keep firmware, bridge, UI, and SDK consistent as they evolve independently. When in doubt, check here first.
+This document defines the repo-wide conventions that all sub-projects must
+follow. Its purpose is to keep firmware, bridge, UI, and SDK consistent as
+they evolve independently.
 
-For the wire protocol specification (TLV frame format, type IDs, payload fields), see [COMMUNICATION_PROTOCOL.md](COMMUNICATION_PROTOCOL.md).
+For the documentation map and source-of-truth index, start with
+[README.md](README.md).
+
+For the wire protocol itself, use:
+
+- [COMMUNICATION_PROTOCOL.md](COMMUNICATION_PROTOCOL.md) for logical behavior
+- [../tlv_protocol/TLV_Payloads.md](../tlv_protocol/TLV_Payloads.md) for exact
+  payload layouts
 
 ---
 
@@ -21,7 +30,7 @@ For the wire protocol specification (TLV frame format, type IDs, payload fields)
 
 ```
 Arduino firmware
-    ↕  UART (TLV v3.0, 250 kbps)
+    ↕  UART (compact TLV v4, 200 kbps default)
 nuevo_bridge  ←→  (conversion: 0-based wire ↔ 1-based user)
     ↕  WebSocket (JSON)
 NUEVO UI / Python SDK
@@ -35,6 +44,7 @@ Each concern has exactly one authoritative source. Everything else derives from 
 
 | Concern | Source of Truth |
 |---------|----------------|
+| Logical protocol semantics | `docs/COMMUNICATION_PROTOCOL.md` |
 | TLV type IDs and field names | `tlv_protocol/TLV_TypeDefs.json` |
 | Payload field layouts and sizes | `tlv_protocol/TLV_Payloads.md` |
 | Generated C++ type constants | `firmware/arduino/src/messages/TLV_TypeDefs.h` (auto-generated) |
@@ -52,7 +62,8 @@ python generate_tlv_types.py
 # Generates TLV_TypeDefs.py → nuevo_ui/backend/nuevo_bridge/TLV_TypeDefs.py
 ```
 
-After regenerating, update `TLV_Payloads.md` and `COMMUNICATION_PROTOCOL.md` to match any schema changes.
+After regenerating, update `TLV_Payloads.md` and `COMMUNICATION_PROTOCOL.md`
+to match any schema changes.
 
 ---
 

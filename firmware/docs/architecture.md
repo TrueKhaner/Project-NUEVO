@@ -1,6 +1,6 @@
 # Firmware Architecture
 
-This document describes the current `v0.9.5` Arduino firmware as it is implemented in the codebase today. It is the top-level map for maintainers. Detailed subsystem behavior is split into focused companion documents:
+This document describes the Arduino firmware as it is implemented in the codebase today. It is the top-level map for maintainers. Detailed subsystem behavior is split into focused companion documents:
 
 - [`communication_and_state.md`](communication_and_state.md)
 - [`motion_control.md`](motion_control.md)
@@ -49,10 +49,11 @@ These are "run when work is available" services, not fixed-rate periodic tasks.
 
 | Task | Rate | What it does |
 |------|------|--------------|
-| `taskUART()` | `50 Hz` | heartbeat timeout cadence, deferred work, telemetry packing |
+| `taskUART()` | `100 Hz` | heartbeat timeout cadence, deferred work, telemetry packing on a staggered slot wheel |
+| `taskMotorFeedback()` | `200 Hz` | refresh encoder-derived DC position/velocity cache for all motors |
 | `taskMotors()` | event-driven from fast lane | compute one full DC control round when requested |
 | `taskSafety()` | `100 Hz` | evaluate heartbeat and battery fault conditions |
-| `taskSensors()` | `100 Hz` | IMU/ultrasonic/voltage dispatch and button/limit sampling |
+| `taskSensors()` | `100 Hz` | IMU/voltage dispatch and button/limit sampling |
 | `taskUserIO()` | `20 Hz` | LED patterns and deferred NeoPixel rendering |
 | `StatusReporter::task()` | `1 Hz` by default | snapshot a human-readable system report |
 
@@ -81,7 +82,7 @@ Detailed implementation is pushed into modules, but the actual runtime wiring re
 7. initialize `UserIO`
 8. initialize `ServoController`
 9. initialize `StepperManager`
-10. initialize DC motors, encoders, and velocity estimators
+10. initialize DC motors and encoders
 11. attach encoder interrupts
 12. register fast-lane tasks
 13. register periodic tasks
@@ -121,7 +122,7 @@ This order matters because several modules depend on earlier bring-up:
 
 | File | Responsibility |
 |------|----------------|
-| `modules/MessageCenter.*` | TLV decode/route/encode, heartbeat tracking, telemetry scheduling, deferred slow side effects |
+| `modules/MessageCenter.*` | TLV decode/route/encode, heartbeat tracking, staggered telemetry scheduling, deferred slow side effects |
 | `modules/DebugLog.*` | queued human-readable USB debug output |
 | `modules/StatusReporter.*` | 1 Hz chunked `[SYSTEM] / [TIMING] / [SENSORS] / [UART]` reporting |
 | `modules/LoopMonitor.*` | timing stats and budget overrun tracking |
@@ -133,8 +134,7 @@ This order matters because several modules depend on earlier bring-up:
 | `drivers/DCMotor.*` | one DC motor channel: feedback latch, control compute, staged output publish, H-bridge drive |
 | `modules/MotorControlCoordinator.*` | Timer1 round bookkeeping and loop/ISR handoff for the fixed one-round pipeline |
 | `modules/EncoderCounter*` | encoder count back-end for INT and PCINT channels |
-| `modules/VelocityEstimator*` | encoder-based velocity estimation |
-| `modules/DCMotorBringup.*` | repeated DC motor, encoder, and estimator initialization |
+| `modules/DCMotorBringup.*` | repeated DC motor and encoder initialization |
 | `modules/StepperManager.*` | stepper-manager ownership of Timer3 configuration and multi-stepper dispatch |
 | `drivers/StepperMotor.*` | one stepper channel: motion planning, pulse timing, homing switch checks |
 | `drivers/ServoController.*` | PCA9685-based servo output over I2C |
@@ -144,11 +144,10 @@ This order matters because several modules depend on earlier bring-up:
 
 | File | Responsibility |
 |------|----------------|
-| `modules/SensorManager.*` | IMU, ultrasonic, voltage monitoring, and magnetometer calibration state |
+| `modules/SensorManager.*` | IMU, voltage monitoring, and magnetometer calibration state |
 | `modules/PersistentStorage.*` | EEPROM-backed calibration persistence |
 | `modules/UserIO.*` | button cache, limit-switch cache, discrete LED output modes, deferred NeoPixel state rendering |
 | `drivers/IMUDriver.*` | ICM-20948 wrapper |
-| `drivers/UltrasonicDriver.*` | SparkFun Qwiic ultrasonic wrapper |
 | `drivers/NeoPixelDriver.*` | minimal NeoPixel wrapper used by `UserIO` |
 
 ## 5. Two Coding Patterns Used in the Firmware
@@ -177,7 +176,6 @@ Things that have multiple physical channels use real objects:
 
 - `dcMotors[NUM_DC_MOTORS]`
 - encoder instances
-- velocity-estimator instances
 - stepper instances inside `StepperManager`
 
 Rule of thumb:

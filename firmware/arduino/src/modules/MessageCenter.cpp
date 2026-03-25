@@ -32,6 +32,34 @@
 // External references to motor arrays (defined in arduino.ino)
 extern DCMotor dcMotors[NUM_DC_MOTORS];
 
+namespace {
+uint16_t limitMaskForGpio(uint8_t gpio)
+{
+    switch (gpio) {
+    case PIN_LIM1: return 0x01U;
+    case PIN_LIM2: return 0x02U;
+    case PIN_LIM3: return 0x04U;
+    case PIN_LIM4: return 0x08U;
+    case PIN_LIM5: return 0x10U;
+    case PIN_LIM6: return 0x20U;
+    case PIN_LIM7: return 0x40U;
+    case PIN_LIM8: return 0x80U;
+    default:       return 0x0000U;
+    }
+}
+
+void reseedOdometryIfDriveMotor(uint8_t motorId)
+{
+    if (motorId != ODOM_LEFT_MOTOR && motorId != ODOM_RIGHT_MOTOR) {
+        return;
+    }
+
+    RobotKinematics::reseed(
+        dcMotors[ODOM_LEFT_MOTOR].getPosition(),
+        dcMotors[ODOM_RIGHT_MOTOR].getPosition());
+}
+} // namespace
+
 #ifdef DEBUG_UART_RX_BYTES
 static void logRawRxBurst(const uint8_t *bytes, uint8_t count)
 {
@@ -101,7 +129,7 @@ uint32_t MessageCenter::lastIOInputStateSendMs_ = 0;
 uint32_t MessageCenter::lastIOOutputStateSendMs_ = 0;
 uint32_t MessageCenter::lastSysStateSendMs_ = 0;
 uint32_t MessageCenter::lastMagCalSendMs_ = 0;
-uint32_t MessageCenter::lastUltrasonicAllSendMs_ = 0;
+uint8_t MessageCenter::telemetrySlot_ = 0;
 
 bool MessageCenter::pendingMagCal_ = false;
 bool MessageCenter::pendingServoStatus_ = false;
@@ -163,20 +191,21 @@ void MessageCenter::init()
     decodeDesc_.tlvHeaders = decodeHeaders_;
     decodeDesc_.tlvData = decodeData_;
 
-    // Stagger the bring-up telemetry timers so the 25 Hz traffic alternates
-    // across adjacent 20 ms UART task slots.
+    // Seed telemetry timers from the current wall clock so each stream starts
+    // from a known baseline; runtime cadence is controlled directly by the
+    // configured TELEMETRY_* intervals in sendTelemetry().
     uint32_t now = millis();
     lastDCStateSendMs_     = now;
     lastStepStateSendMs_   = now;
     lastServoStateSendMs_  = now;
-    lastKinematicsSendMs_  = now - 20;  // first 25 Hz kinematics frame at now+20 ms
-    lastIMUSendMs_         = now - 20;  // first 25 Hz IMU frame at now+20 ms
+    lastKinematicsSendMs_  = now;
+    lastIMUSendMs_         = now;
     lastIOInputStateSendMs_ = now;
     lastIOOutputStateSendMs_ = now;
     lastSysPowerSendMs_    = now;
     lastSysStateSendMs_    = now;
     lastMagCalSendMs_      = now;
-    lastUltrasonicAllSendMs_ = now;
+    telemetrySlot_ = 0;
 
     lastHeartbeatMs_ = now;
     lastCmdMs_ = now;
@@ -247,7 +276,7 @@ bool MessageCenter::appendTelemetryTlv(uint16_t tlvType, uint16_t tlvLen, const 
 
     // Allow one large TLV through if it is the only thing in the frame, but
     // avoid piling additional telemetry onto a frame that is already near the
-    // UART drain limit for the 50 Hz comms task.
+    // UART drain limit for the 100 Hz comms task.
     if (encodeDesc_.frameHeader.numTlvs > 0 &&
         encodeDesc_.bufferIndex + required > TX_FRAME_SOFT_LIMIT) {
         return false;
@@ -363,7 +392,7 @@ void MessageCenter::drainUart()
 }
 
 // ----------------------------------------------------------------------------
-// processIncoming — called from taskUART at 50 Hz
+// processIncoming — called from taskUART at 100 Hz
 // ----------------------------------------------------------------------------
 void MessageCenter::processIncoming()
 {
@@ -515,6 +544,9 @@ void MessageCenter::snapshotTrafficWindow(uint16_t &rxBytes,
 
 void MessageCenter::sendTelemetry()
 {
+    const uint8_t slot = telemetrySlot_;
+    telemetrySlot_ = (uint8_t)((telemetrySlot_ + 1U) % 10U);
+
     // Do not rebuild the shared TX buffer while the previous frame is still
     // draining. sendFrame() also guards this, but by that point beginFrame()
     // and the appendTelemetryTlv() calls would already have overwritten
@@ -525,21 +557,14 @@ void MessageCenter::sendTelemetry()
     }
 
     uint32_t currentMs = millis();
-    const uint8_t phase = (uint8_t)((currentMs / 20U) % 10U);
-
     SystemState state = SystemManager::getState();
     bool running = (state == SYS_STATE_RUNNING);
     bool runningOrError = (state == SYS_STATE_RUNNING || state == SYS_STATE_ERROR);
-    bool anyDcEnabled = false;
-    for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
-        if (dcMotors[i].isEnabled()) {
-            anyDcEnabled = true;
-            break;
-        }
-    }
+    const bool evenFastLane = (slot & 1U) == 0U;
+    const bool oddFastLane = !evenFastLane;
     const bool anyStepperActive = StepperManager::anyEnabled() || StepperManager::anyMoving();
     const bool servoEnabled = ServoController::isEnabled();
-    const uint32_t dcStateInterval = anyDcEnabled ? TELEMETRY_DC_STATE_MS : 1000UL;
+    const uint32_t dcStateInterval = TELEMETRY_DC_STATE_MS;
     const uint32_t stepStateInterval = anyStepperActive ? TELEMETRY_STEP_STATE_MS
                                                         : (uint32_t)TELEMETRY_STEP_STATE_MS * 4UL;
     const uint32_t servoStateInterval = servoEnabled ? TELEMETRY_SERVO_STATE_MS
@@ -548,6 +573,8 @@ void MessageCenter::sendTelemetry()
                                                      : TELEMETRY_SYS_STATE_IDLE_MS;
     const uint32_t sysPowerInterval = runningOrError ? TELEMETRY_SYS_POWER_RUN_MS
                                                      : TELEMETRY_SYS_POWER_IDLE_MS;
+    const uint32_t kinematicsInterval = running ? TELEMETRY_KINEMATICS_MS
+                                                : TELEMETRY_KINEMATICS_IDLE_MS;
 
     // Open a new frame; all send*() calls below append TLVs to it.
     beginFrame();
@@ -582,14 +609,16 @@ void MessageCenter::sendTelemetry()
 
     // ---- Core system streams first so link / fault state wins under TX pressure ----
     if (state != SYS_STATE_INIT &&
-        currentMs - lastSysStateSendMs_ >= sysStateInterval && phase == 7U)
+        currentMs - lastSysStateSendMs_ >= sysStateInterval &&
+        slot == 1U)
     {
         lastSysStateSendMs_ = currentMs;
         sendSysState();
     }
 
     if (state != SYS_STATE_INIT &&
-        currentMs - lastSysPowerSendMs_ >= sysPowerInterval && phase == 9U)
+        currentMs - lastSysPowerSendMs_ >= sysPowerInterval &&
+        slot == 6U)
     {
         lastSysPowerSendMs_ = currentMs;
         sendSysPower();
@@ -599,37 +628,31 @@ void MessageCenter::sendTelemetry()
     if (running)
     {
         if (pendingDCStatus_ ||
-            (currentMs - lastDCStateSendMs_ >= dcStateInterval && phase == 0U))
+            (evenFastLane &&
+             currentMs - lastDCStateSendMs_ >= dcStateInterval))
         {
             lastDCStateSendMs_ = currentMs;
             pendingDCStatus_ = false;
             sendDCStateAll();
         }
 
-        if (currentMs - lastStepStateSendMs_ >= stepStateInterval &&
-            phase == 8U)
+        if (oddFastLane &&
+            currentMs - lastStepStateSendMs_ >= stepStateInterval)
         {
             lastStepStateSendMs_ = currentMs;
             sendStepStateAll();
         }
 
-        if (anyDcEnabled &&
-            currentMs - lastKinematicsSendMs_ >= TELEMETRY_KINEMATICS_MS &&
-            phase == 2U)
-        {
-            lastKinematicsSendMs_ = currentMs;
-            sendSensorKinematics();
-        }
-
-        if (currentMs - lastIOInputStateSendMs_ >= TELEMETRY_IO_INPUT_STATE_MS && phase == 4U)
+        if (oddFastLane &&
+            currentMs - lastIOInputStateSendMs_ >= TELEMETRY_IO_INPUT_STATE_MS)
         {
             lastIOInputStateSendMs_ = currentMs;
             sendIOInputState();
         }
 
         if (SensorManager::isIMUAvailable() &&
-            currentMs - lastIMUSendMs_ >= TELEMETRY_IMU_MS &&
-            phase == 6U)
+            evenFastLane &&
+            currentMs - lastIMUSendMs_ >= TELEMETRY_IMU_MS)
         {
             lastIMUSendMs_ = currentMs;
             sendSensorIMU();
@@ -637,16 +660,24 @@ void MessageCenter::sendTelemetry()
 
     }
 
-    // IMU data is useful in IDLE for bring-up and calibration workflows even
-    // though the main runtime telemetry rates are defined around RUNNING.
+    // IMU data is useful in IDLE for bring-up and calibration workflows, so
+    // keep a dedicated configurable idle cadence.
     if (!running &&
         state != SYS_STATE_INIT &&
         SensorManager::isIMUAvailable() &&
-        currentMs - lastIMUSendMs_ >= 100 &&
-        phase == 6U)
+        evenFastLane &&
+        currentMs - lastIMUSendMs_ >= TELEMETRY_IMU_IDLE_MS)
     {
         lastIMUSendMs_ = currentMs;
         sendSensorIMU();
+    }
+
+    if (state != SYS_STATE_INIT &&
+        oddFastLane &&
+        currentMs - lastKinematicsSendMs_ >= kinematicsInterval)
+    {
+        lastKinematicsSendMs_ = currentMs;
+        sendSensorKinematics();
     }
 
     // Servo status is needed in IDLE as well because the UI can enable and
@@ -656,7 +687,7 @@ void MessageCenter::sendTelemetry()
         (pendingServoStatus_ ||
          (running &&
           currentMs - lastServoStateSendMs_ >= servoStateInterval &&
-          phase == 5U)))
+          slot == 3U)))
     {
         lastServoStateSendMs_ = currentMs;
         pendingServoStatus_ = false;
@@ -666,28 +697,17 @@ void MessageCenter::sendTelemetry()
     if (state != SYS_STATE_INIT &&
         (pendingIOOutputState_ ||
          (currentMs - lastIOOutputStateSendMs_ >= TELEMETRY_IO_OUTPUT_STATE_MS &&
-          phase == 5U)))
+          slot == 4U)))
     {
         lastIOOutputStateSendMs_ = currentMs;
         pendingIOOutputState_ = false;
         sendIOOutputState();
     }
 
-    if (state != SYS_STATE_INIT &&
-        SensorManager::getUltrasonicConfiguredCount() > 0 &&
-        ((running &&
-          currentMs - lastUltrasonicAllSendMs_ >= TELEMETRY_ULTRASONIC_ALL_MS) ||
-         (!running &&
-          currentMs - lastUltrasonicAllSendMs_ >= 100)))
-    {
-        lastUltrasonicAllSendMs_ = currentMs;
-        sendUltrasonicAll();
-    }
-
     // ---- Mag cal status at 5 Hz while sampling ----
     if (SensorManager::getMagCalData().state == MAG_CAL_STATE_SAMPLING)
     {
-        if (currentMs - lastMagCalSendMs_ >= 200 && phase == 1U)
+        if (currentMs - lastMagCalSendMs_ >= 200 && slot == 8U)
         {
             lastMagCalSendMs_ = currentMs;
             sendMagCalStatus();
@@ -891,6 +911,16 @@ void MessageCenter::routeMessage(uint8_t type, const uint8_t *payload, uint8_t l
     case DC_SET_PWM:
         if (allowMotorCmds && length == sizeof(PayloadDCSetPWM))
             handleDCSetPWM((const PayloadDCSetPWM *)payload);
+        break;
+
+    case DC_RESET_POSITION:
+        if (allowQueries && length == sizeof(PayloadDCResetPosition))
+            handleDCResetPosition((const PayloadDCResetPosition *)payload);
+        break;
+
+    case DC_HOME:
+        if (allowMotorCmds && length == sizeof(PayloadDCHome))
+            handleDCHome((const PayloadDCHome *)payload);
         break;
 
     // ---- Stepper commands (RUNNING only) ----
@@ -1139,8 +1169,8 @@ void MessageCenter::handleDCEnable(const PayloadDCEnable *payload)
     }
     else
     {
-        if (!SystemManager::canEnableDriveActuator()) {
-            DEBUG_LOG.println(F("[DC] Enable rejected: battery absent or invalid state."));
+        if (!SystemManager::canRunDriveActuator()) {
+            DEBUG_LOG.println(F("[DC] Enable rejected: RUNNING state with battery required."));
             return;
         }
         motor.enable((DCMotorMode)payload->mode);
@@ -1155,6 +1185,10 @@ void MessageCenter::handleDCSetPosition(const PayloadDCSetPosition *payload)
     if (!SystemManager::canRunDriveActuator()) return;
 
     DCMotor &motor = dcMotors[payload->motorId];
+    if (!motor.isEnabled()) {
+        DEBUG_LOG.println(F("[DC] Set position rejected: motor disabled."));
+        return;
+    }
     // Auto-switch to position mode. Only call enable() on mode change so
     // the PID is not reset unnecessarily when updating an in-flight target.
     if (motor.getMode() != DC_MODE_POSITION)
@@ -1171,6 +1205,10 @@ void MessageCenter::handleDCSetVelocity(const PayloadDCSetVelocity *payload)
     if (!SystemManager::canRunDriveActuator()) return;
 
     DCMotor &motor = dcMotors[payload->motorId];
+    if (!motor.isEnabled()) {
+        DEBUG_LOG.println(F("[DC] Set velocity rejected: motor disabled."));
+        return;
+    }
     if (motor.getMode() != DC_MODE_VELOCITY)
         motor.enable(DC_MODE_VELOCITY);
 
@@ -1185,10 +1223,49 @@ void MessageCenter::handleDCSetPWM(const PayloadDCSetPWM *payload)
     if (!SystemManager::canRunDriveActuator()) return;
 
     DCMotor &motor = dcMotors[payload->motorId];
+    if (!motor.isEnabled()) {
+        DEBUG_LOG.println(F("[DC] Set PWM rejected: motor disabled."));
+        return;
+    }
     if (motor.getMode() != DC_MODE_PWM)
         motor.enable(DC_MODE_PWM);
 
     motor.setDirectPWM(payload->pwm);
+    pendingDCStatus_ = true;
+}
+
+void MessageCenter::handleDCResetPosition(const PayloadDCResetPosition *payload)
+{
+    if (payload->motorId >= NUM_DC_MOTORS) {
+        return;
+    }
+
+    DCMotor &motor = dcMotors[payload->motorId];
+    motor.resetPosition(0);
+    reseedOdometryIfDriveMotor(payload->motorId);
+    pendingDCStatus_ = true;
+}
+
+void MessageCenter::handleDCHome(const PayloadDCHome *payload)
+{
+    if (payload->motorId >= NUM_DC_MOTORS) {
+        return;
+    }
+    if (!SystemManager::canRunDriveActuator()) {
+        return;
+    }
+
+    DCMotor &motor = dcMotors[payload->motorId];
+    if (!motor.isEnabled()) {
+        DEBUG_LOG.println(F("[DC] Home rejected: motor disabled."));
+        return;
+    }
+    if (!motor.hasHomeLimit()) {
+        DEBUG_LOG.println(F("[DC] Home rejected: no configured home limit."));
+        return;
+    }
+
+    motor.home(payload->direction, payload->homeVelocity);
     pendingDCStatus_ = true;
 }
 
@@ -1206,7 +1283,7 @@ void MessageCenter::handleStepEnable(const PayloadStepEnable *payload)
 
     if (payload->enable)
     {
-        if (!SystemManager::canEnableDriveActuator()) return;
+        if (!SystemManager::canRunDriveActuator()) return;
         s->enable();
     }
     else
@@ -1432,7 +1509,13 @@ void MessageCenter::sendDCStateAll()
     {
         DCMotorState &s = payload.motors[i];
         s.mode = (uint8_t)dcMotors[i].getMode();
-        s.faultFlags = dcMotors[i].isEncoderFailed() ? 0x02 : 0;
+        s.faultFlags = 0;
+        if (dcMotors[i].isHomeLimitTriggered()) {
+            s.faultFlags |= 0x01;
+        }
+        if (dcMotors[i].isEncoderFailed()) {
+            s.faultFlags |= 0x02;
+        }
         s.position = dcMotors[i].getPosition();
         s.velocity = (int32_t)dcMotors[i].getVelocity();
         s.targetPos = dcMotors[i].getTargetPosition();
@@ -1520,31 +1603,6 @@ void MessageCenter::sendSensorIMU()
     appendTelemetryTlv(SENSOR_IMU, sizeof(payload), &payload);
 }
 
-void MessageCenter::sendUltrasonicAll()
-{
-    PayloadSensorUltrasonicAll payload;
-    memset(&payload, 0, sizeof(payload));
-
-    payload.configuredCount = SensorManager::getUltrasonicConfiguredCount();
-    for (uint8_t i = 0; i < TLV_MAX_ULTRASONICS; ++i) {
-        if (i >= payload.configuredCount) {
-            payload.sensors[i].status = ULTRA_STATUS_NOT_INSTALLED;
-            payload.sensors[i].distanceMm = 0;
-            continue;
-        }
-        if (SensorManager::isUltrasonicFound(i)) {
-            payload.sensors[i].status = ULTRA_STATUS_VALID;
-            payload.sensors[i].distanceMm = SensorManager::getUltrasonicDistanceMm(i);
-        } else {
-            payload.sensors[i].status = ULTRA_STATUS_NOT_INSTALLED;
-            payload.sensors[i].distanceMm = 0;
-        }
-    }
-    payload.timestamp = millis();
-
-    appendTelemetryTlv(SENSOR_ULTRASONIC_ALL, sizeof(payload), &payload);
-}
-
 void MessageCenter::sendSensorKinematics()
 {
     RobotKinematics::update(
@@ -1572,6 +1630,7 @@ void MessageCenter::sendSysPower()
     payload.batteryMv = (uint16_t)(SensorManager::getBatteryVoltage() * 1000.0f);
     payload.rail5vMv = (uint16_t)(SensorManager::get5VRailVoltage() * 1000.0f);
     payload.servoRailMv = (uint16_t)(SensorManager::getServoVoltage() * 1000.0f);
+    payload.batteryType = (uint8_t)BATTERY_TYPE;
     payload.reserved = 0;
     payload.timestamp = millis();
 
@@ -1731,37 +1790,52 @@ void MessageCenter::sendSysInfoRsp()
     if (IMU_ENABLED) {
         payload.featureMask |= FEATURE_IMU;
     }
-    if (ULTRASONIC_COUNT > 0) {
-        payload.featureMask |= FEATURE_ULTRASONIC;
-    }
     payload.sensorCapabilityMask = 0;
     if (IMU_ENABLED) payload.sensorCapabilityMask |= SENSORCFG_IMU;
-    if (ULTRASONIC_COUNT > 0) payload.sensorCapabilityMask |= SENSORCFG_ULTRASONIC;
     payload.dcMotorCount = NUM_DC_MOTORS;
     payload.stepperCount = NUM_STEPPERS;
     payload.servoChannelCount = NUM_SERVO_CHANNELS;
-    payload.ultrasonicMaxCount = TLV_MAX_ULTRASONICS;
+    payload.ultrasonicMaxCount = 0;
     payload.userLedCount = LED_COUNT;
     payload.maxNeoPixelCount = NEOPIXEL_COUNT;
     payload.limitSwitchMask = 0;
     for (uint8_t i = 0; i < TLV_MAX_STEPPERS; ++i) {
         payload.stepperHomeLimitGpio[i] = 0xFF;
     }
+    for (uint8_t i = 0; i < TLV_MAX_DC_MOTORS; ++i) {
+        payload.dcHomeLimitGpio[i] = 0xFF;
+    }
 #if defined(PIN_ST1_LIMIT)
-    payload.limitSwitchMask |= 0x01U;
+    payload.limitSwitchMask |= limitMaskForGpio(PIN_ST1_LIMIT);
     payload.stepperHomeLimitGpio[0] = PIN_ST1_LIMIT;
 #endif
 #if defined(PIN_ST2_LIMIT)
-    payload.limitSwitchMask |= 0x02U;
+    payload.limitSwitchMask |= limitMaskForGpio(PIN_ST2_LIMIT);
     payload.stepperHomeLimitGpio[1] = PIN_ST2_LIMIT;
 #endif
 #if defined(PIN_ST3_LIMIT)
-    payload.limitSwitchMask |= 0x04U;
+    payload.limitSwitchMask |= limitMaskForGpio(PIN_ST3_LIMIT);
     payload.stepperHomeLimitGpio[2] = PIN_ST3_LIMIT;
 #endif
 #if defined(PIN_ST4_LIMIT)
-    payload.limitSwitchMask |= 0x08U;
+    payload.limitSwitchMask |= limitMaskForGpio(PIN_ST4_LIMIT);
     payload.stepperHomeLimitGpio[3] = PIN_ST4_LIMIT;
+#endif
+#if defined(PIN_M1_LIMIT)
+    payload.limitSwitchMask |= limitMaskForGpio(PIN_M1_LIMIT);
+    payload.dcHomeLimitGpio[0] = PIN_M1_LIMIT;
+#endif
+#if defined(PIN_M2_LIMIT)
+    payload.limitSwitchMask |= limitMaskForGpio(PIN_M2_LIMIT);
+    payload.dcHomeLimitGpio[1] = PIN_M2_LIMIT;
+#endif
+#if defined(PIN_M3_LIMIT)
+    payload.limitSwitchMask |= limitMaskForGpio(PIN_M3_LIMIT);
+    payload.dcHomeLimitGpio[2] = PIN_M3_LIMIT;
+#endif
+#if defined(PIN_M4_LIMIT)
+    payload.limitSwitchMask |= limitMaskForGpio(PIN_M4_LIMIT);
+    payload.dcHomeLimitGpio[3] = PIN_M4_LIMIT;
 #endif
 
     appendTlv(SYS_INFO_RSP, sizeof(payload), &payload);
@@ -1774,7 +1848,6 @@ void MessageCenter::sendSysConfigRsp()
     payload.motorDirMask = motorDirMask_;
     payload.configuredSensorMask = 0;
     if (IMU_ENABLED) payload.configuredSensorMask |= SENSORCFG_IMU;
-    if (ULTRASONIC_COUNT > 0) payload.configuredSensorMask |= SENSORCFG_ULTRASONIC;
     payload.neoPixelCount = neoPixelCount_;
     payload.heartbeatTimeoutMs = heartbeatTimeoutMs_;
 
@@ -1878,7 +1951,7 @@ void MessageCenter::disableAllActuators()
             dcMotors[i].disable();
     }
     pendingDCStatus_ = true;
-    StepperManager::emergencyStopAll();
+    StepperManager::disableAll();
     ServoController::disable();
     servoEnabledMask_ = 0;
     servoHardwareDirty_ = false;

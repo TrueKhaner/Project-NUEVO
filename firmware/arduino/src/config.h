@@ -19,10 +19,33 @@
 // FIRMWARE VERSION
 // ============================================================================
 
-#define FIRMWARE_VERSION        0x00090500  // Version 0.9.5
+#define FIRMWARE_VERSION        0x00090700  // Version 0.9.7
 #define TLV_PROTOCOL_VERSION_MAJOR 4
 #define TLV_PROTOCOL_VERSION_MINOR 0
 #define BOARD_REVISION          0       // 0 = unspecified / unknown
+
+// ============================================================================
+// ROBOT GEOMETRY — edit these to match your robot
+// ============================================================================
+
+// Outer diameter of each drive wheel (mm)
+#define WHEEL_DIAMETER_MM   74.0f
+
+// Centre-to-centre track width between the two drive wheels (mm)
+#define WHEEL_BASE_MM       333.0f
+
+// Initial theta (degree)
+#define INITIAL_THETA       90.0f
+
+// DC motor index that drives the left drive wheel (0-based, 0–3)
+// Positive encoder ticks must mean "wheel moving forward".
+// If the count direction is wrong, set ENCODER_N_DIR_INVERTED in config.h.
+#define ODOM_LEFT_MOTOR     0
+#define ODOM_LEFT_MOTOR_DIR_INVERTED 0
+
+// DC motor index that drives the right drive wheel (0-based, 0–3)
+#define ODOM_RIGHT_MOTOR    1
+#define ODOM_RIGHT_MOTOR_DIR_INVERTED 1
 
 // ============================================================================
 // QUICK TUNE SETTINGS
@@ -33,23 +56,23 @@
 // battery section below.
 
 // UART link to Raspberry Pi
-#define RPI_BAUD_RATE           250000  // Stable bring-up rate for Mega2560 <-> RPi
+#define RPI_BAUD_RATE           200000  // Stable bring-up rate for Mega2560 <-> RPi
 #define HEARTBEAT_TIMEOUT_MS    500     // Disable actuators if heartbeat stops
 
-// Shared I2C bus used by the sensor stack.
-// Keep the runtime bus conservative at 100 kHz for stable coexistence between
-// the ICM-20948, Qwiic ultrasonic, and PCA9685 on the Mega.
+// Shared I2C bus used by the Arduino-side sensor stack.
+// Bring the bus up conservatively at 100 kHz during init, then run the IMU
+// path at 400 kHz during normal polling. The servo controller forces its own
+// 100 kHz access before PCA9685 transactions.
 #define I2C_INIT_CLOCK_HZ       100000
-#define I2C_BUS_CLOCK_HZ        100000
+#define I2C_BUS_CLOCK_HZ        400000
 #define SERVO_I2C_CLOCK_HZ      100000
-#define ULTRASONIC_I2C_CLOCK_HZ 100000
 #define I2C_WIRE_TIMEOUT_US     5000
 
 // Soft task cadences
-#define UART_COMMS_FREQ_HZ      50      // UART service task
+#define UART_COMMS_FREQ_HZ      100     // UART service task
 #define MOTOR_UPDATE_FREQ_HZ    200     // DC control compute round
 #define SENSOR_UPDATE_FREQ_HZ   100     // Sensor dispatch task
-#define IMU_UPDATE_FREQ_HZ      50      // IMU read + Fusion update cadence
+#define IMU_UPDATE_FREQ_HZ      25      // IMU read + Fusion update cadence
 #define USER_IO_FREQ_HZ         20      // LEDs / buttons / UI indications
 
 // Human-readable status output on USB serial
@@ -61,7 +84,7 @@
 #define FAULT_EVENT_MIN_INTERVAL_MS 100
 
 // Debug serial
-#define DEBUG_BAUD_RATE         250000
+#define DEBUG_BAUD_RATE         115200
 #define DEBUG_LOG_BUFFER_SIZE   768
 #define DEBUG_FLUSH_MAX_BYTES_PER_PASS 16
 
@@ -143,13 +166,13 @@
 #define MOTOR_TASK_CATCHUP_BUDGET_US 1000 // max wall-clock catch-up budget per taskMotors() pass
 
 // UART task wall-clock budget (used only for oscilloscope debug pin A9 reference)
-// taskUART() runs at 50 Hz; the 20 ms budget is the full tick period.
+// taskUART() runs at 100 Hz; the 10 ms budget is the full tick period.
 // NOTE: micros()-based measurement includes ISR preemption time — it is NOT a
 // control-loop overrun. The PID loop is in Timer1 ISR and cannot overrun here.
-#define UART_TASK_BUDGET_US      20000   // 20 ms = full 50 Hz tick period
+#define UART_TASK_BUDGET_US      10000   // 10 ms = full 100 Hz tick period
 
 // UART-safe ISR budgets.
-// At 250 kbps a UART byte arrives every 40 us. Keeping the common ISR path
+// At 200 kbps a UART byte arrives every 50 us. Keeping the common ISR path
 // below ~80 us preserves margin against USART2 hardware overrun (DOR2).
 #define PID_ISR_UART_BUDGET_US      80
 #define STEPPER_ISR_UART_BUDGET_US  60
@@ -180,7 +203,7 @@ extern Print &DEBUG_SERIAL;
 // TLV runtime stream periods to the Raspberry Pi.
 // These are live wire-message periods, not USB debug print intervals.
 // Effective ceiling: periodic TLVs are emitted from taskUART(), so with the
-// default UART_COMMS_FREQ_HZ = 50 the fastest practical interval is 20 ms.
+// default UART_COMMS_FREQ_HZ = 100 the fastest practical interval is 10 ms.
 #define TELEMETRY_SYS_STATE_RUN_MS        100
 #define TELEMETRY_SYS_STATE_IDLE_MS       1000
 #define TELEMETRY_SYS_POWER_RUN_MS        100
@@ -188,11 +211,12 @@ extern Print &DEBUG_SERIAL;
 #define TELEMETRY_DC_STATE_MS             20
 #define TELEMETRY_STEP_STATE_MS           20
 #define TELEMETRY_SERVO_STATE_MS          100
-#define TELEMETRY_IMU_MS                  20
-#define TELEMETRY_KINEMATICS_MS           20
+#define TELEMETRY_IMU_MS                  40
+#define TELEMETRY_IMU_IDLE_MS             100
+#define TELEMETRY_KINEMATICS_MS           40
+#define TELEMETRY_KINEMATICS_IDLE_MS      100
 #define TELEMETRY_IO_INPUT_STATE_MS       20
 #define TELEMETRY_IO_OUTPUT_STATE_MS      100
-#define TELEMETRY_ULTRASONIC_ALL_MS       20
 
 // Device identification
 #define DEVICE_ID               0x01    // Arduino device ID for TLV protocol
@@ -202,8 +226,8 @@ extern Print &DEBUG_SERIAL;
 // VELOCITY ESTIMATION CONFIGURATION
 // ============================================================================
 
-// Velocity estimator settings
-#define VELOCITY_FILTER_SIZE    4       // Moving average filter size (2-8 samples)
+// Fixed-rate velocity feedback settings
+#define VELOCITY_LOWPASS_CONST  0.50f   // Low-pass weight on raw speed; y=(y+raw*k)/(1+k)
 #define VELOCITY_ZERO_TIMEOUT   50      // Zero velocity timeout (milliseconds)
 
 // ============================================================================
@@ -230,7 +254,7 @@ extern Print &DEBUG_SERIAL;
 // ============================================================================
 
 // IMU (ICM-20948 via SparkFun library + Fusion AHRS)
-#define IMU_ENABLED             0
+#define IMU_ENABLED             1
 // AD0_VAL: 0 = I2C addr 0x68 (AD0 pin LOW), 1 = I2C addr 0x69 (AD0 pin HIGH)
 #define IMU_AD0_VAL             1       // SparkFun breakout default: AD0 high = 0x69
 // Explicit IMU full-scale settings. Keep these aligned with FusionWrapper and
@@ -260,13 +284,10 @@ extern Print &DEBUG_SERIAL;
 // Note: this lidar is not supported on the Arduino firmware. Use the RPi-side
 // Qwiic bus and the Pi test tooling in ros2_ws/tests if the lidar is needed.
 
-// Ultrasonic (SparkFun Qwiic HC-SR04, via I2C)
-#define ULTRASONIC_COUNT        0       // Number of attached ultrasonic sensors (0 to disable)
-// Up to 4 ultrasonic sensors at different I2C addresses (configurable via Example 2)
-#define ULTRASONIC_0_I2C_ADDR   0x2F    // Default Qwiic Ultrasonic address
-#define ULTRASONIC_1_I2C_ADDR   0x2E
-#define ULTRASONIC_2_I2C_ADDR   0x2D
-#define ULTRASONIC_3_I2C_ADDR   0x2C
+// Ultrasonic
+// Note: ultrasonic is not supported on the Arduino firmware. Use the RPi-side
+// sensor stack for ultrasonic sensing, similar to the lidar path.
+#define ULTRASONIC_COUNT        0
 
 // ============================================================================
 // MAGNETOMETER CALIBRATION
@@ -409,6 +430,15 @@ extern Print &DEBUG_SERIAL;
 #define PIN_ST3_LIMIT           PIN_LIM3  // Stepper 3 limit (48)
 #define PIN_ST4_LIMIT           PIN_LIM4  // Stepper 4 limit (49)
 
+// DC motor home limit switch assignments (optional)
+// Uncomment and update these definitions if DC motors use limit switches for
+// encoder zeroing / homing. Leave undefined to disable homing for that motor.
+
+#define PIN_M1_LIMIT        PIN_LIM5
+#define PIN_M2_LIMIT        PIN_LIM6
+#define PIN_M3_LIMIT        PIN_LIM7
+#define PIN_M4_LIMIT        PIN_LIM8
+
 // Limit switch active state
 #define LIMIT_ACTIVE_LOW        1       // 1 = active low, 0 = active high
 
@@ -435,10 +465,10 @@ extern Print &DEBUG_SERIAL;
 //     A7   ENCODER_ISR   HIGH = inside any encoder interrupt
 //
 //   UART task timing:
-//     A11  UART_TASK     HIGH = entire taskUART() running (50 Hz, ~1-6 ms typical)
+//     A11  UART_TASK     HIGH = entire taskUART() running (100 Hz, ~1-6 ms typical)
 //     A12  UART_RX       HIGH = inside processIncoming() only
 //     A13  UART_TX       HIGH = inside sendTelemetry() only
-//     A9   UART_LATE     Pulse when wall-clock > 20 ms (usually ISR preemption, not a real problem)
+//     A9   UART_LATE     Pulse when wall-clock > 10 ms (usually ISR preemption, not a real problem)
 //
 // KEY INSIGHT (verified by scope):
 //   micros()-based measurement in loop() INCLUDES ISR preemption time.
@@ -456,9 +486,9 @@ extern Print &DEBUG_SERIAL;
 //     Ch1=A11 (UART_TASK), Ch2=A10 (PID_LOOP) — time-base 1 ms/div.
 //     PID pulses inside UART_TASK window = ISR preemption inflation (normal).
 //
-//   Q: "Is the UART task running reliably at 50 Hz?"
+//   Q: "Is the UART task running reliably at 100 Hz?"
 //     Ch1=A11 (UART_TASK) — time-base 5 ms/div, trigger rising.
-//     Period should be ~20 ms; width should be 1-6 ms.
+//     Period should be ~10 ms; width should be 1-6 ms.
 //
 #define DEBUG_PINS_ENABLED      0
 
@@ -466,7 +496,7 @@ extern Print &DEBUG_SERIAL;
   // ISR channels (original)
   #define DEBUG_PIN_ENCODER_ISR   A7    // HIGH inside any encoder ISR
   #define DEBUG_PIN_STEPPER_ISR   A8    // HIGH inside Timer3 (stepper) ISR
-  #define DEBUG_PIN_UART_LATE     A9    // Pulse when taskUART() wall-clock > 20 ms (ISR inflation, not a real error)
+  #define DEBUG_PIN_UART_LATE     A9    // Pulse when taskUART() wall-clock > 10 ms (ISR inflation, not a real error)
   #define DEBUG_PIN_PID_LOOP      A10   // HIGH inside Timer1 (PID) ISR
 
   // UART task sub-channels (new — overrun diagnosis)

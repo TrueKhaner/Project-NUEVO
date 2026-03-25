@@ -6,18 +6,18 @@ current Arduino firmware.
 ## Supported on Arduino
 
 - ICM-20948 IMU
-- SparkFun Qwiic ultrasonic sensor(s)
 - battery / 5 V / servo-rail voltage monitoring
 - PCA9685 servo controller on the same `Wire` bus
 
 ## Not supported on Arduino
 
 - Garmin / SparkFun LIDAR-Lite v4
+- SparkFun Qwiic ultrasonic sensor(s)
 
-The LIDAR-Lite v4 is now treated as a Raspberry Pi-side sensor only. The
-Arduino firmware no longer contains a lidar driver, polling path, telemetry
-path, or status reporting for it. If the robot uses this lidar, connect it to
-the Pi-side Qwiic bus and use the Pi-side test tooling under
+The LIDAR-Lite v4 and the Qwiic ultrasonic are now treated as Raspberry Pi-side
+sensors only. The Arduino firmware no longer contains an ultrasonic polling or
+telemetry path. If the robot uses lidar or ultrasonic sensing, connect those
+sensors to the Pi-side bus and use the Pi-side tooling under
 [`ros2_ws/tests/`](../../ros2_ws/tests/).
 
 ## 1. Shared `Wire` Bus Ownership
@@ -26,7 +26,6 @@ The Arduino Mega uses one global `Wire` bus for all I2C peripherals that remain
 on the MCU side:
 
 - IMU
-- ultrasonic sensor(s)
 - PCA9685 servo controller
 
 The firmware does not implement a separate software I2C arbiter object. Bus
@@ -64,7 +63,7 @@ This is why:
 It runs from `taskSensors()` at `100 Hz` and dispatches internal work at three
 rates:
 
-- `update100Hz()` -> alternating IMU read and Fusion/ultrasonic phases
+- `update100Hz()` -> alternating IMU read and Fusion phases
 - `update50Hz()` -> reserved medium-rate lane
 - `update10Hz()` -> voltage rails
 
@@ -91,30 +90,10 @@ Implementation:
 
 Current timing model:
 
-- blocking I2C read at an effective `50 Hz`
-- Fusion update at an effective `50 Hz` on the alternating sensor tick
-- `FusionWrapper` is initialized with `IMU_UPDATE_FREQ_HZ = 50`
+- blocking I2C read at an effective `25 Hz`
+- Fusion update at an effective `25 Hz` on the alternating sensor tick
+- `FusionWrapper` is initialized with `IMU_UPDATE_FREQ_HZ = 25`
 - timing reported separately in the status output as `imu`
-
-### Ultrasonic path
-
-Files:
-
-- `drivers/UltrasonicDriver.*`
-- `modules/SensorManager.*`
-
-Implementation:
-
-- ultrasonic sensors are initialized in `SensorManager::init()`
-- configured slots that do not respond are tracked as "configured but missing"
-- the Fusion-phase tick iterates each configured ultrasonic slot and reads the
-  latest distance from the SparkFun Qwiic ultrasonic board
-
-Current timing model:
-
-- blocking I2C reads
-- scheduled at `50 Hz`
-- timing reported separately in the status output as `ultra`
 
 ### Voltage monitoring
 
@@ -165,9 +144,6 @@ Important implementation details:
 - sampling is updated from the IMU update path
 - `PersistentStorage::init()` must run before `SensorManager::init()` so saved
   calibration can be loaded on boot
-- the EEPROM layout version is now `v3`; older saved mag calibration is
-  intentionally invalidated because previous builds did not serialize the
-  soft-iron matrix correctly
 - `startMagCalibration()` temporarily disables any previously active mag
   calibration so the bridge sees raw magnetometer data
 - `cancelMagCalibration()` restores the previous active calibration, if one
@@ -177,8 +153,8 @@ Important implementation details:
   context
 
 The firmware still tracks min/max and midpoint offsets while sampling because
-they are useful for progress reporting and for the legacy hard-iron-only save
-path. The production path, however, is:
+they are useful for progress reporting and for a hard-iron fallback if the
+bridge cannot produce a good soft-iron fit. The normal path is:
 
 1. UI enters calibration mode and ensures the firmware is in `IDLE`
 2. bridge sends `MAG_CAL_START`
@@ -203,7 +179,7 @@ Implementation:
 
 - `ServoController` owns PCA9685 initialization, OE control, pulse-width
   conversion, and grouped channel writes
-- the PCA9685 shares the same `Wire` bus as the IMU and ultrasonic sensors
+- the PCA9685 shares the same `Wire` bus as the IMU
 - servo I2C writes are never done directly from packet decode
 - decode handlers only mark pending servo work
 - `MessageCenter::processDeferred()` later applies the pending writes in soft
@@ -227,52 +203,33 @@ This is the timing of `taskSensors()` as a whole, including:
 - `SensorManager::tick()`
 - `UserIO::sampleInputs()`
 
-### Ultrasonic loop only
-
-Reported as:
-
-- `ultra a/b/c (...) us`
-
-This measures only the ultrasonic read loop on the Fusion/ultrasonic phase of
-`SensorManager::update100Hz()`.
-
-The `[SENSORS]` block prints the current ultrasonic values, including slots
-that are configured but missing.
-
 ## 7. Bus Settings and Stability Notes
 
 Current bus settings are:
 
-- `I2C_BUS_CLOCK_HZ = 400000`
+- `I2C_BUS_CLOCK_HZ = 100000`
 - `SERVO_I2C_CLOCK_HZ = 100000`
 - `I2C_WIRE_TIMEOUT_US = 5000`
 
-The sensor task restores the sensor polling clock before each tick. This keeps
-IMU reads short enough to coexist with the loop-owned DC control compute round.
-
-The PCA9685 servo driver now explicitly forces the shared bus back to
+The PCA9685 servo driver explicitly forces the shared bus back to
 `SERVO_I2C_CLOCK_HZ` before runtime servo transactions. That avoids the case
-where sensor polling has already moved `Wire` to `400 kHz` and later servo
-writes inherit that fast bus speed on marginal hardware.
+where other shared-bus users have already touched `Wire` and later servo writes
+inherit the wrong bus speed on marginal hardware.
 
-The servo controller, IMU, and ultrasonic sensors are expected to coexist on
-that bus. If a new I2C device is added on the Arduino side, it should follow
+The servo controller and IMU are expected to coexist on that bus. If a new I2C
+device is added on the Arduino side, it should follow
 the same rules:
 
 - no ISR use
 - no decode-context use
 - explicit timeout behavior if the library can block
 
-## 8. LIDAR-Lite v4 Note
+## 8. Pi-Side Range Sensors
 
-The Project NUEVO firmware previously contained an Arduino-side LIDAR-Lite v4
-integration. That path was removed because the lidar did not behave reliably on
-the shared Arduino I2C topology.
+Range sensors are Pi-side only in the released system design.
 
-Current project decision:
-
-- Arduino firmware: no lidar support
-- Raspberry Pi side: lidar support lives there instead
+- Arduino firmware: no lidar or ultrasonic support
+- Raspberry Pi side: lidar and ultrasonic support live there instead
 
 Keep that separation unless the hardware topology changes enough to justify a
 new Arduino-side design.

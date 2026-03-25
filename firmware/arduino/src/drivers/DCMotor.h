@@ -14,7 +14,7 @@
  *          │
  *          └──> [Velocity PID] ──> PWM Output
  *                    ↑
- *                    └── Velocity Feedback (from VelocityEstimator)
+ *                    └── Velocity Feedback (from the fixed-rate feedback task)
  *
  * Hardware Interface:
  * - PWM output (EN pin): Speed control via analogWrite()
@@ -24,15 +24,15 @@
  * Usage:
  *   DCMotor motor;
  *   EncoderCounter2x encoder;
- *   EdgeTimeVelocityEstimator velocityEst;
  *
- *   motor.init(0, &encoder, &velocityEst);  // Motor ID 0
+ *   motor.init(0, &encoder);                // Motor ID 0
  *   motor.setVelocityPID(1.0, 0.1, 0.01);   // Tune PID gains
  *   motor.enable(DCMotor::VELOCITY);        // Enable velocity mode
  *   motor.setTargetVelocity(1000);          // 1000 ticks/sec
  *
- *   // In PID loop @ 200Hz:
- *   motor.update();
+ *   // In loop-owned tasks:
+ *   motor.refreshFeedback();   // 200 Hz shared feedback update
+ *   motor.service();           // per-slot control compute when enabled
  */
 
 #ifndef DCMOTOR_H
@@ -40,8 +40,8 @@
 
 #include <Arduino.h>
 #include <stdint.h>
+#include "../config.h"
 #include "../modules/EncoderCounter.h"
-#include "../modules/VelocityEstimator.h"
 #include "../messages/TLV_Payloads.h"  // For DCMotorMode enum
 
 // ============================================================================
@@ -140,10 +140,9 @@ public:
      *
      * @param motorId Motor identifier (0-3)
      * @param encoder Pointer to encoder counter instance
-     * @param velocityEst Pointer to velocity estimator instance
      * @param invertDir Direction inversion flag (false=normal, true=inverted)
      */
-    void init(uint8_t motorId, IEncoderCounter *encoder, IVelocityEstimator *velocityEst, bool invertDir = false);
+    void init(uint8_t motorId, IEncoderCounter *encoder, bool invertDir = false);
 
     /**
      * @brief Configure hardware pins
@@ -153,6 +152,14 @@ public:
      * @param pinIN2 Direction pin 2
      */
     void setPins(uint8_t pinEN, uint8_t pinIN1, uint8_t pinIN2);
+
+    /**
+     * @brief Configure home limit switch pin for optional homing.
+     *
+     * @param pinLimit Limit switch GPIO
+     * @param activeState Triggered state (HIGH or LOW)
+     */
+    void setLimitPin(uint8_t pinLimit, uint8_t activeState);
 
     /**
      * @brief Configure current sense pin and scaling
@@ -177,14 +184,14 @@ public:
     /**
      * @brief Check if motor is enabled
      *
-     * @return True if motor is in POSITION or VELOCITY mode
+     * @return True if motor is in any active control mode (not DISABLED)
      */
     bool isEnabled() const;
 
     /**
      * @brief Get current control mode
      *
-     * @return Current mode (DISABLED, POSITION, or VELOCITY)
+     * @return Current mode (DISABLED, POSITION, VELOCITY, PWM, or HOMING)
      */
     DCMotorMode getMode() const { return mode_; }
 
@@ -238,6 +245,28 @@ public:
      */
     void setDirectPWM(int16_t pwm);
 
+    /**
+     * @brief Reset encoder position to a specific value.
+     *
+     * This updates the encoder counter and refreshes all cached feedback state
+     * so telemetry, PID, and odometry continue from the new baseline cleanly.
+     *
+     * @param position New encoder position in ticks (default 0)
+     */
+    void resetPosition(int32_t position = 0);
+
+    /**
+     * @brief Start a limit-switch homing move.
+     *
+     * The motor runs in a dedicated homing mode until the configured home
+     * limit triggers. When triggered, the motor stops and the encoder
+     * position is reset to zero.
+     *
+     * @param direction +1 or -1 homing direction
+     * @param homeVelocityTicksPerSec Velocity setpoint magnitude in ticks/sec
+     */
+    void home(int8_t direction, int32_t homeVelocityTicksPerSec);
+
     // PID gain getters for DC_PID_RSP and bridge-side state merge
     float getPosKp() const { return positionPID_.getKp(); }
     float getPosKi() const { return positionPID_.getKi(); }
@@ -285,6 +314,15 @@ public:
      * staged output prepared for that motor's most recent request.
      */
     void publishStagedOutputISR();
+
+    /**
+     * @brief Refresh encoder position and fixed-rate velocity feedback.
+     *
+     * This loop-owned helper keeps the cached feedback state current for both
+     * enabled and disabled motors. The mixed control task and telemetry path
+     * both consume the same feedbackVelocityQ16_ value populated here.
+     */
+    void refreshFeedback();
 
     // ========================================================================
     // STATE QUERIES
@@ -347,6 +385,16 @@ public:
      * Cleared automatically on the next enable() call.
      */
     bool isEncoderFailed() const { return encoderFailed_; }
+    bool hasHomeLimit() const { return hasLimit_; }
+    bool isHomeLimitTriggered() const { return isLimitTriggered(); }
+
+    /**
+     * @brief Consume an encoder-baseline reset event.
+     *
+     * Returns true once after resetPosition()/successful homing changes the
+     * encoder count. Used by odometry to reseed its tick baseline.
+     */
+    bool consumeEncoderResetEvent();
 
 private:
     // Hardware
@@ -355,8 +403,11 @@ private:
     uint8_t pinIN1_;                        // Direction pin 1
     uint8_t pinIN2_;                        // Direction pin 2
     uint8_t pinCT_;                         // Current sense pin (analog)
+    uint8_t pinLimit_;                      // Home limit pin (optional)
+    uint8_t limitActiveState_;              // Triggered state for home limit
     bool invertDir_;                        // Direction inversion flag
     bool hasCurrentSense_;                  // True if current sensing is configured
+    bool hasLimit_;                         // True if home limit pin configured
 
     // Control state
     DCMotorMode mode_;                      // Current control mode
@@ -373,7 +424,6 @@ private:
 
     // Sensor interfaces
     IEncoderCounter *encoder_;              // Encoder counter instance
-    IVelocityEstimator *velocityEst_;       // Velocity estimator instance
 
     // Fast-loop cached state shared with TIMER1 ISR
     volatile int32_t targetVelocityQ16_;    // Velocity setpoint in Q16.16
@@ -397,19 +447,23 @@ private:
     int32_t          velIAccQ16_;
     int32_t          velPrevErrQ16_;
     int32_t          prevPosition_;
+    uint32_t         prevEdgeUs_;
     bool             feedbackSeeded_;
 
     // Cached GPIO access for the fast path
     volatile uint8_t *in1OutReg_;
     volatile uint8_t *in2OutReg_;
+    volatile const uint8_t *limitInReg_;
     uint8_t           in1Mask_;
     uint8_t           in2Mask_;
+    uint8_t           limitMask_;
 
     // Encoder stall detection
     bool     encoderFailed_;                // Latches true once stall fault declared; cleared by enable()
     int32_t  lastCheckedPos_;               // Encoder count when stall window opened
     uint32_t stuckStartMs_;                 // millis() when stall window opened
     bool     stuckTracking_;                // True while actively tracking a potential stall
+    bool     encoderResetEvent_;            // True when encoder baseline was externally reset
 
     // ========================================================================
     // INTERNAL HELPERS
@@ -431,6 +485,11 @@ private:
      * @brief Apply a precomputed drive state + OCR duty to the hardware pins.
      */
     void applyOutput(uint8_t drive, uint16_t duty);
+
+    /**
+     * @brief Return true when the configured home limit is currently active.
+     */
+    bool isLimitTriggered() const;
 };
 
 #endif // DCMOTOR_H

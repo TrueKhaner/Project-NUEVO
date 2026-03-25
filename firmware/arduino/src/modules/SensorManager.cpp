@@ -25,11 +25,6 @@ uint16_t SensorManager::imuTimingAvgUs_ = 0;
 uint16_t SensorManager::imuTimingPeakUs_ = 0;
 uint16_t SensorManager::imuTimingMaxUs_ = 0;
 
-UltrasonicDriver SensorManager::ultrasonics_[SENSOR_MAX_ULTRASONICS];
-uint8_t          SensorManager::ultrasonicCount_   = 0;
-bool             SensorManager::ultrasonicFound_[SENSOR_MAX_ULTRASONICS]   = {};
-uint16_t         SensorManager::ultrasonicDistMm_[SENSOR_MAX_ULTRASONICS]  = {};
-
 float   SensorManager::batteryVoltage_   = 0.0f;
 float   SensorManager::rail5VVoltage_    = 0.0f;
 float   SensorManager::servoVoltage_     = 0.0f;
@@ -51,15 +46,6 @@ float SensorManager::magCalBackupMatrix_[9] = {
 bool     SensorManager::initialized_   = false;
 uint32_t SensorManager::updateCount_   = 0;
 uint32_t SensorManager::lastUpdateTime_ = 0;
-uint16_t SensorManager::ultrasonicTimingAvgUs_ = 0;
-uint16_t SensorManager::ultrasonicTimingPeakUs_ = 0;
-uint16_t SensorManager::ultrasonicTimingMaxUs_ = 0;
-
-// I2C addresses for configured sensors (from config.h)
-static const uint8_t kUltrasonicAddrs[4] = {
-    ULTRASONIC_0_I2C_ADDR, ULTRASONIC_1_I2C_ADDR,
-    ULTRASONIC_2_I2C_ADDR, ULTRASONIC_3_I2C_ADDR
-};
 
 namespace {
 
@@ -136,28 +122,6 @@ void SensorManager::init() {
     } else {
 #ifdef DEBUG_SENSOR
         DEBUG_SERIAL.println(F("[SensorManager] WARNING: IMU not detected"));
-#endif
-    }
-#endif
-
-    // --- Ultrasonic sensors ---
-#if ULTRASONIC_COUNT > 0
-    ultrasonicCount_ = 0;
-    for (uint8_t i = 0; i < ULTRASONIC_COUNT && i < SENSOR_MAX_ULTRASONICS; i++) {
-        ultrasonicFound_[i] = ultrasonics_[i].init(kUltrasonicAddrs[i]);
-        if (ultrasonicFound_[i]) {
-            ultrasonicCount_++;
-        }
-#ifdef DEBUG_SENSOR
-        if (ultrasonicFound_[i]) {
-            DEBUG_SERIAL.print(F("[SensorManager] Ultrasonic "));
-            DEBUG_SERIAL.print(i);
-            DEBUG_SERIAL.println(F(": OK"));
-        } else {
-            DEBUG_SERIAL.print(F("[SensorManager] WARNING: Ultrasonic "));
-            DEBUG_SERIAL.print(i);
-            DEBUG_SERIAL.println(F(" not detected (configured but missing)"));
-        }
 #endif
     }
 #endif
@@ -269,23 +233,6 @@ void SensorManager::update100Hz() {
     }
 #endif
 
-    if (!imuReadPhase) {
-        static uint8_t ultrasonicDivider = 0;
-        uint32_t ultrasonicStartUs = micros();
-        if (++ultrasonicDivider >= 5U) {
-            ultrasonicDivider = 0U;
-            for (uint8_t i = 0; i < ULTRASONIC_COUNT && i < SENSOR_MAX_ULTRASONICS; i++) {
-                if (ultrasonicFound_[i]) {
-                    ultrasonicDistMm_[i] = ultrasonics_[i].getDistanceMm();
-                }
-            }
-        }
-        recordTiming(Utility::clampElapsedUs(micros() - ultrasonicStartUs),
-                     ultrasonicTimingAvgUs_,
-                     ultrasonicTimingPeakUs_,
-                     ultrasonicTimingMaxUs_);
-    }
-
     imuReadPhase = !imuReadPhase;
 }
 
@@ -326,25 +273,8 @@ int16_t SensorManager::getRawMagY() { return imu_.getRawMagY(); }
 int16_t SensorManager::getRawMagZ() { return imu_.getRawMagZ(); }
 int16_t SensorManager::getRawTempDeciC() { return (int16_t)(imu_.getTemp() * 10.0f); }
 
-// ============================================================================
-// RANGE SENSOR OUTPUT
-// ============================================================================
-
-bool SensorManager::isUltrasonicFound(uint8_t idx) {
-    if (idx >= SENSOR_MAX_ULTRASONICS) return false;
-    return ultrasonicFound_[idx];
-}
-
-uint8_t SensorManager::getUltrasonicConfiguredCount() { return ULTRASONIC_COUNT; }
-
-uint16_t SensorManager::getUltrasonicDistanceMm(uint8_t idx) {
-    if (idx >= SENSOR_MAX_ULTRASONICS || !ultrasonicFound_[idx]) return 0;
-    return ultrasonicDistMm_[idx];
-}
-
 void SensorManager::clearTimingPeaks() {
     imuTimingPeakUs_ = 0;
-    ultrasonicTimingPeakUs_ = 0;
 }
 
 // ============================================================================

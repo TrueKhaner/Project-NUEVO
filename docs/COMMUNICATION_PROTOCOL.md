@@ -2,9 +2,9 @@
 ## v4 Logical Source of Truth
 
 **Version:** 4.0  
-**Date:** 2026-03-21  
-**Status:** Finalized logical source of truth for the next TLV redesign before
-`tlv_protocol/`, firmware, and `nuevo_bridge` are updated.
+**Date:** 2026-03-24  
+**Status:** Current implemented logical source of truth for the compact TLV
+protocol used by firmware, `nuevo_bridge`, and the UI.
 
 ---
 
@@ -20,13 +20,13 @@
 7. [Logical TLV Catalog](#7-logical-tlv-catalog)
 8. [Streaming Policy](#8-streaming-policy)
 9. [Diagnostics Policy](#9-diagnostics-policy)
-10. [Migration Notes](#10-migration-notes)
+10. [Implementation Notes](#10-implementation-notes)
 
 ---
 
 ## 0. Purpose
 
-This file is the **human-readable source of truth** for the next protocol
+This file is the **human-readable source of truth** for the current protocol
 revision.
 
 It defines:
@@ -45,9 +45,9 @@ Those remain in:
 | [`../tlv_protocol/TLV_TypeDefs.json`](../tlv_protocol/TLV_TypeDefs.json) | Numeric TLV IDs |
 | [`../tlv_protocol/TLV_Payloads.md`](../tlv_protocol/TLV_Payloads.md) | Exact payload layouts and sizes |
 
-Workflow for this redesign:
+Maintenance workflow:
 
-1. Define the logical message design here first.
+1. Update logical behavior here first.
 2. Update `TLV_TypeDefs.json` and `TLV_Payloads.md`.
 3. Regenerate generated type definitions.
 4. Update firmware and bridge implementations.
@@ -108,15 +108,15 @@ The protocol remains **stream-oriented**, not request/ack driven.
 
 ### 2.3 Stream only what changes fast
 
-The redesign explicitly separates:
+The current protocol explicitly separates:
 
 - fast-changing runtime state
 - slow-changing mutable configuration
 - nearly static identity/capability information
 - engineering/debug diagnostics
 
-This is the main reason `SYS_STATUS`, `DC_STATUS_ALL`, `STEP_STATUS_ALL`, and
-`IO_STATUS` are being split.
+This keeps runtime streams focused on frequently changing data and moves static
+or diagnostic data into dedicated snapshot messages.
 
 ### 2.4 Multi-TLV bundling remains first-class
 
@@ -124,7 +124,8 @@ Frames may contain multiple TLVs. This remains a core optimization.
 
 - transport framing stays compact
 - bundling due TLVs into one frame remains the normal streaming mode
-- the redesign changes TLV meaning and grouping, not the compact frame concept
+- the transport remains compact and multi-TLV capable
+- message meaning and grouping are defined by the logical catalog below
 
 ---
 
@@ -139,7 +140,7 @@ The transport/framing layer stays the current compact TLV design.
 | Interface | UART |
 | Arduino port | `Serial2` |
 | RPi port | board-configured serial port |
-| Default baud | `250000` |
+| Default baud | `200000` |
 | Format | `8N1` |
 | Duplex | full duplex |
 
@@ -166,7 +167,7 @@ Current framing rules that remain:
 - maximum single TLV payload length = `255 bytes`
 - multiple TLVs per frame supported and expected
 
-This redesign is about **logical TLV structure**, not a new transport format.
+This document is about **logical TLV structure**, not a new transport format.
 
 ---
 
@@ -180,7 +181,7 @@ The protocol-visible firmware states remain:
 - `ERROR`
 - `ESTOP`
 
-High-level behavior stays the same:
+High-level behavior:
 
 - `INIT` performs setup and enters `IDLE`
 - `IDLE` is safe and accepts configuration
@@ -188,10 +189,7 @@ High-level behavior stays the same:
 - `ERROR` disables actuators and exposes fault state
 - `ESTOP` is the strict emergency state
 
-The redesigned protocol mainly changes **how state is reported**, not the
-state machine itself.
-
-The main system-level streamed state message is now:
+The main system-level streamed state message is:
 
 - `SYS_STATE`
 
@@ -201,7 +199,7 @@ not a large mixed `SYS_STATUS`.
 
 ## 5. Message Naming and Semantics
 
-The redesign uses consistent naming:
+The protocol uses consistent naming:
 
 | Suffix | Meaning |
 |---|---|
@@ -401,6 +399,7 @@ Contains:
 - battery voltage
 - 5V rail
 - servo rail
+- configured battery type / chemistry identifier
 - optional future power-related live state if needed
 
 Recommended stream rate:
@@ -422,7 +421,7 @@ Expected content:
 - configured/supported channel counts
 - supported sensor capabilities
 - compile-time hardware mappings that the UI needs to interpret other state
-- limit-switch mask and stepper home-switch mapping
+- limit-switch mask plus stepper/DC home-switch mappings
 
 This is part of bootstrap and should not be part of a fast stream.
 
@@ -442,7 +441,7 @@ Expected content:
 
 Set mutable system-level configuration.
 
-This replaces the old mixed `SYS_CONFIG` role but should no longer include
+This message sets mutable system-level configuration. It should not include
 action-like commands such as odometry reset.
 
 #### `SYS_ODOM_RESET` ↓
@@ -481,6 +480,17 @@ Velocity target command.
 #### `DC_SET_PWM` ↓
 Open-loop PWM command.
 
+#### `DC_RESET_POSITION` ↓
+Reset one motor's encoder position to zero without requiring the motor to be enabled.
+
+This is an encoder-baseline action, not a motion command.
+
+#### `DC_HOME` ↓
+Run a DC motor homing sequence toward its configured home limit.
+
+The firmware uses the compile-time DC home-limit mapping from `config.h`. If no
+home limit is configured for that motor, the command is rejected.
+
 #### `DC_STATE_ALL` ↑
 
 Streamed live DC runtime state for all motors.
@@ -494,6 +504,8 @@ Should include:
 - actual PWM output
 - current measurement if available
 - per-motor fault flags
+  - limit active
+  - encoder fault
 - one message-level timestamp
 
 Should **not** include PID gains.
@@ -541,8 +553,6 @@ Should contain:
 #### `STEP_CONFIG_SET` ↓
 
 Set stepper motion parameters.
-
-This replaces the old `STEP_SET_PARAMS` naming.
 
 #### `STEP_STATE_ALL` ↑
 
@@ -636,13 +646,7 @@ Recommended rate:
 
 #### `SENSOR_ULTRASONIC_ALL` ↑
 
-This replaces the old one-reading-per-message `SENSOR_RANGE` pattern on the
-Arduino side.
-
-Because lidar is no longer on the Arduino, the generic mixed range-sensor TLV
-is no longer the right abstraction for the firmware.
-
-This message should bundle all configured ultrasonic slots into one runtime
+This message bundles all configured ultrasonic slots into one runtime
 message containing:
 
 - per-sensor status
@@ -652,6 +656,12 @@ message containing:
 Recommended rate:
 
 - `RUNNING`: `50 Hz`
+
+Implementation note:
+
+- the current Arduino firmware does not emit `SENSOR_ULTRASONIC_ALL`
+- Pi-side components may still use this message family if ultrasonic sensing is
+  exposed through the bridge later
 
 #### `SENSOR_MAG_CAL_CMD` ↓
 Keep this workflow-specific command.
@@ -775,26 +785,17 @@ These belong under `SYS_DIAG_REQ / SYS_DIAG_RSP`.
 
 ---
 
-## 10. Migration Notes
+## 10. Implementation Notes
 
-This document defines the target protocol shape. It is not yet the exact
-implemented schema.
+The protocol described here is now the implemented compact-TLV layout.
 
-Expected changes from the current logical design:
+Important current implementation notes:
 
-- split `SYS_STATUS` into `SYS_STATE`, `SYS_INFO_*`, `SYS_CONFIG_*`, and `SYS_DIAG_*`
-- move `SENSOR_VOLTAGE` to `SYS_POWER`
-- split `IO_STATUS` into `IO_INPUT_STATE` and `IO_OUTPUT_STATE`
-- replace single-reading `SENSOR_RANGE` with bundled `SENSOR_ULTRASONIC_ALL`
-- remove PID gains from streamed DC state
-- remove stepper config from streamed stepper state
-- formalize `REQ/RSP` for snapshots
-- formalize bridge bootstrap after firmware reset
-
-Implementation order should be:
-
-1. review and finalize this logical catalog
-2. update `tlv_protocol/TLV_TypeDefs.json`
-3. update `tlv_protocol/TLV_Payloads.md`
-4. regenerate generated type files
-5. update firmware and bridge together
+- `SYS_STATE`, `SYS_POWER`, `SYS_INFO_*`, `SYS_CONFIG_*`, and `SYS_DIAG_*`
+  are split and active
+- `REQ/RSP` is the normal snapshot pattern
+- the bridge uses `uptimeMs` regression to trigger bootstrap refresh after
+  Arduino reset
+- the Arduino-side runtime no longer supports lidar or ultrasonic sensing;
+  those sensors are Pi-side only
+- `SYS_POWER` now carries both rail voltages and the configured `batteryType`

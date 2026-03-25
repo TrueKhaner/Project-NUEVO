@@ -1,7 +1,7 @@
 /**
  * @file arduino.ino
  * @brief Main firmware for Arduino Mega 2560 educational robotics platform
- * @version 0.9.5
+ * @version 0.9.7
  *
  * Educational robotics platform firmware for MAE 162 course.
  * Provides real-time motor control, sensor integration, and
@@ -13,7 +13,7 @@
  *     TIMER3_OVF_vect  10 kHz  Stepper pulse generation (StepperManager)
  *
  *   Soft real-time (millis-based, runs in loop() with interrupts enabled):
- *     taskUART          50 Hz  UART RX/TX — loop() keeps USART2_RX_vect alive;
+ *     taskUART         100 Hz  UART RX/TX — loop() keeps USART2_RX_vect alive;
  *                              RX/TX stay out of the ISR path entirely
  *     taskMotors       200 Hz  DC control compute + apply + feedback refresh
  *     taskSafety      100 Hz  heartbeat/battery safety checks
@@ -67,7 +67,6 @@
 
 // DC motor control
 #include "src/modules/EncoderCounter.h"
-#include "src/modules/VelocityEstimator.h"
 #include "src/drivers/DCMotor.h"
 
 // Stepper and servo control
@@ -87,13 +86,13 @@
 #ifndef SERIAL_RX_BUFFER_SIZE
 #error "SERIAL_RX_BUFFER_SIZE not defined. Add -DSERIAL_RX_BUFFER_SIZE=256 to compiler flags."
 #elif SERIAL_RX_BUFFER_SIZE < 256
-#error "SERIAL_RX_BUFFER_SIZE < 256, which is recommanded for 250 kbps."
+#error "SERIAL_RX_BUFFER_SIZE < 256, which is recommanded for the current high-rate RPi UART link."
 #endif
 
 #ifndef SERIAL_TX_BUFFER_SIZE
 #error "SERIAL_TX_BUFFER_SIZE not defined. Add -DSERIAL_TX_BUFFER_SIZE=256 to compiler flags."
 #elif SERIAL_TX_BUFFER_SIZE < 256
-#error "SERIAL_TX_BUFFER_SIZE < 256, which is recommanded for 250 kbps."
+#error "SERIAL_TX_BUFFER_SIZE < 256, which is recommanded for the current high-rate RPi UART link."
 #endif
 
 // ============================================================================
@@ -124,12 +123,6 @@ EncoderCounter2x encoder4;
 #else
 EncoderCounter4x encoder4;
 #endif
-
-// Velocity estimators (edge-time algorithm)
-EdgeTimeVelocityEstimator velocityEst1;
-EdgeTimeVelocityEstimator velocityEst2;
-EdgeTimeVelocityEstimator velocityEst3;
-EdgeTimeVelocityEstimator velocityEst4;
 
 // Motor controller arrays
 DCMotor dcMotors[NUM_DC_MOTORS];
@@ -185,6 +178,19 @@ static void formatLoopFaultMask(uint8_t mask, char *buffer, size_t size) {
   if (first) {
     strlcpy(buffer, "none", size);
   }
+}
+
+static void appendLoopFaultDelta(char *buffer, size_t size, bool &first, const char *token, uint16_t delta) {
+  if (buffer == nullptr || token == nullptr || size == 0U || delta == 0U) {
+    return;
+  }
+  if (!first) {
+    strlcat(buffer, " ", size);
+  }
+  char tokenBuf[20];
+  snprintf(tokenBuf, sizeof(tokenBuf), "%s+%u", token, (unsigned)delta);
+  strlcat(buffer, tokenBuf, size);
+  first = false;
 }
 
 static bool hasActiveDcControl() {
@@ -244,7 +250,8 @@ static bool fastFaultEvents() {
 #if !FAULT_EVENT_LOG_ENABLED
   return false;
 #else
-  static uint8_t lastLoopFaultMask = 0U;
+  static uint16_t lastLoopFaultCounts[LOOP_SLOT_COUNT] = {};
+  static uint16_t lastPidRoundFaultCount = 0U;
   static uint32_t lastMissedCount = 0U;
   static uint32_t lastLateCount = 0U;
   static uint32_t lastReusedCount = 0U;
@@ -266,17 +273,28 @@ static bool fastFaultEvents() {
     return false;
   }
 
-  uint8_t loopMask = LoopMonitor::getLatchedFaultMask();
-  uint8_t newLoopMask = (uint8_t)(loopMask & (uint8_t)~lastLoopFaultMask);
-  if (newLoopMask != 0U) {
-    char loopBuf[28];
-    formatLoopFaultMask(newLoopMask, loopBuf, sizeof(loopBuf));
-    DebugLog::printf_P(PSTR("[LOOP] %s\n"), loopBuf);
-    lastLoopFaultMask = loopMask;
+  char loopDeltaBuf[64];
+  loopDeltaBuf[0] = '\0';
+  bool firstLoopDelta = true;
+  static const char *const kLoopTokens[LOOP_SLOT_COUNT] = {
+    "pid", "step", "motor", "sensor", "uart", "io"
+  };
+  for (uint8_t i = 0; i < LOOP_SLOT_COUNT; ++i) {
+    uint16_t faultCount = LoopMonitor::getFaultCount((LoopSlot)i);
+    uint16_t delta = (uint16_t)(faultCount - lastLoopFaultCounts[i]);
+    lastLoopFaultCounts[i] = faultCount;
+    appendLoopFaultDelta(loopDeltaBuf, sizeof(loopDeltaBuf), firstLoopDelta, kLoopTokens[i], delta);
+  }
+  uint16_t pidRoundFaultCount = LoopMonitor::getPidRoundFaultCount();
+  uint16_t pidRoundDelta = (uint16_t)(pidRoundFaultCount - lastPidRoundFaultCount);
+  lastPidRoundFaultCount = pidRoundFaultCount;
+  appendLoopFaultDelta(loopDeltaBuf, sizeof(loopDeltaBuf), firstLoopDelta, "pidr", pidRoundDelta);
+
+  if (!firstLoopDelta) {
+    DebugLog::printf_P(PSTR("[LOOP] %s\n"), loopDeltaBuf);
     lastEmitMs = now;
     return true;
   }
-  lastLoopFaultMask = loopMask;
 
   uint32_t roundCount = 0;
   uint32_t requestedRound = 0;
@@ -340,7 +358,7 @@ static bool fastFaultEvents() {
   uint16_t oversizeDelta = (uint16_t)(oversizeCount - lastOversizeCount);
   if (dorDelta != 0U || feDelta != 0U || crcDelta != 0U ||
       frameDelta != 0U || tlvDelta != 0U || oversizeDelta != 0U) {
-    DebugLog::printf_P(PSTR("[UART] dor+%lu fe+%lu crc+%u frame+%u tlv+%u over+%u\n"),
+    DebugLog::printf_P(PSTR("[UART] dor+%lu fe+%lu crc+%u frame+%u tlv+%u oversize+%u\n"),
                        (unsigned long)dorDelta,
                        (unsigned long)feDelta,
                        (unsigned)crcDelta,
@@ -432,7 +450,7 @@ ISR(TIMER3_OVF_vect) {
 }
 
 // ============================================================================
-// SOFT TASK — taskUART (50 Hz, millis-based)
+// SOFT TASK — taskUART (100 Hz, millis-based)
 // ============================================================================
 
 /**
@@ -467,7 +485,7 @@ void taskUART() {
   LoopMonitor::record(SLOT_UART_TASK, elapsed);
 
 #if DEBUG_PINS_ENABLED
-  // A9 (UART_LATE): pulse when wall-clock > 20 ms. This fires due to ISR
+  // A9 (UART_LATE): pulse when wall-clock > 10 ms. This fires due to ISR
   // preemption inflation, NOT actual UART slowness — the PID loop is unaffected.
   if (elapsed > UART_TASK_BUDGET_US) {
     digitalWrite(DEBUG_PIN_UART_LATE, HIGH);
@@ -529,6 +547,35 @@ void taskMotors() {
   } while (MotorControlCoordinator::beginCompute(requestedRound, slotSnapshot));
 
   LoopMonitor::record(SLOT_MOTOR_TASK, Utility::clampElapsedUs(micros() - taskStartUs));
+}
+
+// ============================================================================
+// SOFT TASK — taskMotorFeedback (fixed-rate DC encoder feedback)
+// ============================================================================
+
+/**
+ * @brief Refresh encoder position/velocity feedback for all DC motors.
+ *
+ * This loop-owned task runs at the same 200 Hz cadence as the per-motor mixed
+ * control period, but applies to all motors regardless of enable state. It is
+ * the single source of truth for cached DC velocity used by PID, telemetry,
+ * and odometry.
+ */
+void taskMotorFeedback() {
+  bool odomNeedsReseed = false;
+  for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
+    dcMotors[i].refreshFeedback();
+    if ((i == ODOM_LEFT_MOTOR || i == ODOM_RIGHT_MOTOR) &&
+        dcMotors[i].consumeEncoderResetEvent()) {
+      odomNeedsReseed = true;
+    }
+  }
+
+  if (odomNeedsReseed) {
+    RobotKinematics::reseed(
+      dcMotors[ODOM_LEFT_MOTOR].getPosition(),
+      dcMotors[ODOM_RIGHT_MOTOR].getPosition());
+  }
 }
 
 // ============================================================================
@@ -676,10 +723,10 @@ void setup() {
   DEBUG_SERIAL.print(DCMotorBringup::countsPerRev());
   DEBUG_SERIAL.println(F(" counts/rev"));
   DCMotorBringup::initAll(dcMotors,
-                          encoder1, velocityEst1,
-                          encoder2, velocityEst2,
-                          encoder3, velocityEst3,
-                          encoder4, velocityEst4);
+                          encoder1,
+                          encoder2,
+                          encoder3,
+                          encoder4);
   DEBUG_SERIAL.println(F("  - 4 DC motors initialized"));
 
   DEBUG_SERIAL.println(F("[Setup] Attaching encoder interrupts..."));
@@ -752,6 +799,15 @@ void setup() {
 
   DEBUG_SERIAL.println(F("  - Motors: per-slot mixed round-robin from Timer1 requests"));
 
+  taskId = Scheduler::registerTask(taskMotorFeedback, 1000 / MOTOR_UPDATE_FREQ_HZ, 2);
+  if (taskId >= 0) {
+    DEBUG_SERIAL.print(F("  - Motor Feedback: Task #"));
+    DEBUG_SERIAL.print(taskId);
+    DEBUG_SERIAL.print(F(" @ "));
+    DEBUG_SERIAL.print(1000 / MOTOR_UPDATE_FREQ_HZ);
+    DEBUG_SERIAL.println(F("ms (200Hz)"));
+  }
+
   taskId = Scheduler::registerTask(taskSensors, 1000 / SENSOR_UPDATE_FREQ_HZ, 3);
   if (taskId >= 0) {
     DEBUG_SERIAL.print(F("  - Sensors: Task #"));
@@ -808,7 +864,13 @@ void setup() {
 void loop() {
   StatusReporter::recordLoopGap();
   StatusReporter::updateWindowPeaks();
-  Scheduler::serviceFastLane();
+  while (Scheduler::serviceFastLane() && MotorControlCoordinator::hasPendingRound()) {
+    // Keep draining the highest-priority fast lane while DC control is
+    // backlogged so periodic UART/sensor work does not interleave between
+    // per-slot catch-up passes.
+  }
   Scheduler::tickPeriodic();
-  Scheduler::serviceFastLane();
+  while (Scheduler::serviceFastLane() && MotorControlCoordinator::hasPendingRound()) {
+    // Same control-first catch-up rule after the periodic task pass.
+  }
 }

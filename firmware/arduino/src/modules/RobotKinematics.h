@@ -27,24 +27,6 @@
 #include <stdint.h>
 
 // ============================================================================
-// ROBOT GEOMETRY — edit these to match your robot
-// ============================================================================
-
-// Outer diameter of each drive wheel (mm)
-#define WHEEL_DIAMETER_MM   65.0f
-
-// Centre-to-centre track width between the two drive wheels (mm)
-#define WHEEL_BASE_MM       150.0f
-
-// DC motor index that drives the left drive wheel (0-based, 0–3)
-// Positive encoder ticks must mean "wheel moving forward".
-// If the count direction is wrong, set ENCODER_N_DIR_INVERTED in config.h.
-#define ODOM_LEFT_MOTOR     0
-
-// DC motor index that drives the right drive wheel (0-based, 0–3)
-#define ODOM_RIGHT_MOTOR    1
-
-// ============================================================================
 // KINEMATICS CLASS
 // ============================================================================
 
@@ -55,11 +37,12 @@
  * reports instantaneous body-frame velocities (vx, vy, vTheta).
  *
  * All positions are in millimetres and radians. Positive theta is CCW.
+ * Heading is initialized from INITIAL_THETA in degrees.
  */
 class RobotKinematics {
 public:
     /**
-     * @brief Reset pose to (0, 0, 0) and reseed the tick baseline.
+     * @brief Reset pose to (0, 0, INITIAL_THETA) and reseed the tick baseline.
      *
      * Call once in setup() and again whenever SYS_ODOM_RESET is handled
      * is received. Pass the current encoder counts so the first update()
@@ -69,6 +52,14 @@ public:
      * @param rightTicks Current right encoder count
      */
     static void reset(int32_t leftTicks, int32_t rightTicks);
+
+    /**
+     * @brief Preserve pose but reseed the encoder baseline.
+     *
+     * Use this when an encoder count is externally re-zeroed so the next
+     * update() call does not interpret that count jump as robot motion.
+     */
+    static void reseed(int32_t leftTicks, int32_t rightTicks);
 
     /**
      * @brief Update odometry and instantaneous velocity.

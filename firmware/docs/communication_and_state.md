@@ -1,6 +1,6 @@
 # Communication and State Flow
 
-This document explains how Raspberry Pi communication, the firmware state machine, safety policy, and human-readable reporting are implemented in the current firmware.
+This document explains how Raspberry Pi communication, the firmware state machine, safety policy, and human-readable reporting are implemented.
 
 ## 1. UART / TLV Ownership
 
@@ -81,6 +81,9 @@ Examples:
   - `ESTOP -> SystemManager::triggerEstopCommand()`
 - DC motor enable/motion commands:
   - gated through `SystemManager::canEnableDriveActuator()` and `canRunDriveActuator()`
+- DC encoder baseline / homing actions:
+  - `DC_RESET_POSITION` is accepted whenever the protocol is active
+  - `DC_HOME` is treated as a motion command and requires normal drive-actuator permission
 - servo enable commands:
   - gated through `SystemManager::canEnableServoActuator()`
 
@@ -88,7 +91,7 @@ This keeps the rules for "what is allowed in each state" in one place.
 
 ## 4. Deferred Work
 
-Some received commands used to execute slow side effects immediately in decode context. That created timing spikes and link instability. The current firmware defers those operations.
+Slow side effects are deferred out of the decode path so packet handling stays short and predictable.
 
 ### Deferred servo path
 
@@ -130,21 +133,35 @@ This avoids sending many small standalone frames and keeps telemetry scheduling 
 
 The firmware uses one shared TX buffer. If the previous frame is still draining, rebuilding that same buffer would corrupt the bytes already being transmitted. The current code guards this before rebuilding the frame.
 
-### Telemetry phase spreading
+### Telemetry slot wheel
 
-Telemetry groups are phase-shifted across 20 ms UART task slots to reduce burstiness:
+The firmware runs `taskUART()` at `100 Hz` and uses a fixed
+10-slot wheel to spread telemetry across adjacent UART task passes.
 
-- DC status
-- kinematics
-- ultrasonic
-- I/O
-- servo status
-- IMU
-- system status
-- step status
-- voltage
+The key idea is:
 
-That staggering is one of the main reasons TX queue pressure is lower than earlier bring-up builds.
+- fast streams are split across even and odd `10 ms` slots
+- medium/slow streams are pinned to their own slots
+- query responses still go first in the frame
+
+Current lane layout:
+
+- even slots:
+  - `DC_STATE_ALL` (`50 Hz`)
+  - `SENSOR_IMU` (`25 Hz`)
+- odd slots:
+  - `STEP_STATE_ALL` (`50 Hz`)
+  - `SENSOR_KINEMATICS` (`25 Hz` in `RUNNING`, slower in `IDLE`)
+  - `IO_INPUT_STATE` (`50 Hz`)
+- dedicated slow slots:
+  - slot `1`: `SYS_STATE`
+  - slot `3`: `SERVO_STATE_ALL`
+  - slot `4`: `IO_OUTPUT_STATE`
+  - slot `6`: `SYS_POWER` (battery / 5 V / servo rail + `batteryType`)
+  - slot `8`: `SENSOR_MAG_CAL_STATUS` while sampling
+
+This keeps the configured rates but avoids one large synchronized frame every
+20/100/1000 ms.
 
 ## 6. Heartbeat and Liveness
 
@@ -161,7 +178,7 @@ The heartbeat model is:
 - `lastRxByteMs_`
 - timeout and traffic counters
 
-`SystemManager` decides whether heartbeat timeout matters in the current firmware state.
+`SystemManager` decides whether heartbeat timeout matters in the current state.
 
 In the current policy:
 
@@ -192,7 +209,7 @@ The public trigger API is intentionally explicit:
 
 ### Battery policy
 
-The current battery policy is intentional and implemented in `SystemManager`:
+Battery policy implemented in `SystemManager`:
 
 - the firmware may enter `RUNNING` with no battery present
 - actuator enable commands are ineffective while battery power is absent
@@ -210,7 +227,7 @@ Its main checks are:
 
 When a hard fault is found, it calls `SystemManager::triggerSafetyFaultFromIsr(flags)`.
 
-The name is historical; the current safety check runs from the 100 Hz soft task, not from a hardware ISR. The important point is that the final state-transition decision still lives in `SystemManager`.
+The public API name remains `triggerSafetyFaultFromIsr(...)`, but the active safety check runs from the `100 Hz` soft task. The final state-transition decision still lives in `SystemManager`.
 
 ## 9. Human-Readable Reporting
 
@@ -252,8 +269,15 @@ It is a timing-budget monitor, not a communication monitor. Real link health sti
 
 All human-readable debug text is queued first and flushed later. This avoids long blocking writes to USB serial from sensitive code paths.
 
+When the full reporter is disabled, the firmware still supports short event
+lines for loop/control/UART faults:
+
+- loop overruns are emitted by per-slot fault-count deltas
+- control handoff issues are emitted by `miss/late/reuse/cross` deltas
+- UART event lines report `dor`, `fe`, `crc`, `frame`, `tlv`, and `oversize`
+
 ## 10. Where to Look Next
 
 For the implementation details of the motion stack, use [`motion_control.md`](motion_control.md).
 
-For IMU / ultrasonic / servo / PCA9685 / shared-I2C behavior, use [`sensors_and_i2c.md`](sensors_and_i2c.md).
+For IMU / servo / PCA9685 / shared-I2C behavior, use [`sensors_and_i2c.md`](sensors_and_i2c.md).

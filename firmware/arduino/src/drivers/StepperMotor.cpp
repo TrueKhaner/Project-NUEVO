@@ -13,6 +13,7 @@ namespace {
 constexpr uint16_t kMinStartSpeedSps = 100U;
 constexpr uint16_t kMinStopSpeedSps = 10U;
 constexpr uint32_t kQ16Shift = 16U;
+constexpr uint16_t kStopIntervalTicks = TIMER_FREQ_HZ / kMinStopSpeedSps;
 } // namespace
 
 // ============================================================================
@@ -125,6 +126,7 @@ void StepperMotor::disable() {
     enabled_ = false;
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         state_ = STEPPER_IDLE;
+        targetPosition_ = currentPosition_;
         currentVelocity_ = 0;
         stepsRemaining_ = 0;
     }
@@ -329,10 +331,9 @@ void StepperMotor::smoothStop() {
         return;
     }
 
-    uint16_t stopInterval = TIMER_FREQ_HZ / kMinStopSpeedSps;
     uint32_t decelDeltaQ16 = 0;
-    if (stopInterval > stepInterval) {
-        decelDeltaQ16 = (((uint32_t)(stopInterval - stepInterval)) << kQ16Shift) / decelDistance;
+    if (kStopIntervalTicks > stepInterval) {
+        decelDeltaQ16 = (((uint32_t)(kStopIntervalTicks - stepInterval)) << kQ16Shift) / decelDistance;
     }
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
@@ -351,6 +352,22 @@ void StepperMotor::setPosition(int32_t position) {
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         currentPosition_ = position;
     }
+}
+
+uint32_t StepperMotor::getCurrentSpeed() const {
+    StepperMotionState state;
+    uint16_t stepInterval;
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        state = state_;
+        stepInterval = stepInterval_;
+    }
+
+    if (state == STEPPER_IDLE || stepInterval == 0U) {
+        return 0U;
+    }
+
+    return (uint32_t)(TIMER_FREQ_HZ / stepInterval);
 }
 
 // ============================================================================
@@ -437,13 +454,12 @@ void StepperMotor::timerCallback() {
 
         case STEPPER_DECEL:
             if (decelDeltaQ16_ > 0) {
-                uint16_t stopInterval = TIMER_FREQ_HZ / kMinStopSpeedSps;
-                uint32_t stopIntervalQ16 = ((uint32_t)stopInterval) << kQ16Shift;
+                uint32_t stopIntervalQ16 = ((uint32_t)kStopIntervalTicks) << kQ16Shift;
                 if (intervalQ16_ + decelDeltaQ16_ < stopIntervalQ16) intervalQ16_ += decelDeltaQ16_;
                 else intervalQ16_ = stopIntervalQ16;
                 stepInterval_ = (uint16_t)(intervalQ16_ >> kQ16Shift);
                 if (stepInterval_ < minInterval_) stepInterval_ = minInterval_;
-                if (stepInterval_ > stopInterval) stepInterval_ = stopInterval;
+                if (stepInterval_ > kStopIntervalTicks) stepInterval_ = kStopIntervalTicks;
             }
             break;
 
@@ -451,8 +467,6 @@ void StepperMotor::timerCallback() {
         default:
             break;
     }
-
-    currentVelocity_ = (stepInterval_ > 0) ? (TIMER_FREQ_HZ / stepInterval_) : 0;
 }
 
 bool StepperMotor::isLimitTriggered() const {

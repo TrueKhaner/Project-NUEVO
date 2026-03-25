@@ -92,18 +92,11 @@ struct StatusSnapshot {
     uint16_t imuAvgUs;
     uint16_t imuPeakUs;
     uint16_t imuMaxUs;
-    uint16_t ultrasonicAvgUs;
-    uint16_t ultrasonicPeakUs;
-    uint16_t ultrasonicMaxUs;
     bool imuAvailable;
     bool imuMagCalibrated;
     int16_t imuTempDeciC;
     int16_t imuRawAccZ;
     int16_t imuRawGyrZ;
-    uint8_t ultrasonicConfiguredCount;
-    uint8_t ultrasonicFoundCount;
-    bool ultrasonicFound[SENSOR_MAX_ULTRASONICS];
-    uint16_t ultrasonicDistMm[SENSOR_MAX_ULTRASONICS];
     uint16_t rxBytesWindow;
     uint16_t rxFramesWindow;
     uint16_t rxTlvsWindow;
@@ -498,15 +491,6 @@ void StatusReporter::task() {
     snapshot.sensorPeakUs = LoopMonitor::getPeakUs(SLOT_SENSOR_ISR);
     snapshot.sensorMaxUs = LoopMonitor::getMaxUs(SLOT_SENSOR_ISR);
     snapshot.sensorBudgetUs = LoopMonitor::getBudgetUs(SLOT_SENSOR_ISR);
-    snapshot.ultrasonicAvgUs = SensorManager::getUltrasonicTimingAvgUs();
-    snapshot.ultrasonicPeakUs = SensorManager::getUltrasonicTimingPeakUs();
-    snapshot.ultrasonicMaxUs = SensorManager::getUltrasonicTimingMaxUs();
-    snapshot.ultrasonicConfiguredCount = SensorManager::getUltrasonicConfiguredCount();
-    snapshot.ultrasonicFoundCount = SensorManager::getUltrasonicCount();
-    for (uint8_t i = 0; i < SENSOR_MAX_ULTRASONICS; i++) {
-        snapshot.ultrasonicFound[i] = SensorManager::isUltrasonicFound(i);
-        snapshot.ultrasonicDistMm[i] = SensorManager::getUltrasonicDistanceMm(i);
-    }
     snapshot.uartAvgUs = LoopMonitor::getAvgUs(SLOT_UART_TASK);
     snapshot.uartPeakUs = LoopMonitor::getPeakUs(SLOT_UART_TASK);
     snapshot.uartMaxUs = LoopMonitor::getMaxUs(SLOT_UART_TASK);
@@ -698,13 +682,9 @@ void StatusReporter::emitChunk() {
         {
             uint16_t imuPeakUs;
             uint16_t imuMaxUs;
-            uint16_t ultrasonicPeakUs;
-            uint16_t ultrasonicMaxUs;
             normalizeTimingTriplet(s.imuAvgUs, s.imuPeakUs, s.imuMaxUs, imuPeakUs, imuMaxUs);
-            normalizeTimingTriplet(s.ultrasonicAvgUs, s.ultrasonicPeakUs, s.ultrasonicMaxUs, ultrasonicPeakUs, ultrasonicMaxUs);
-            DebugLog::printf_P(PSTR("imu %u/%u/%u (%u) us | ultra %u/%u/%u (%u) us\n"),
-                               s.imuAvgUs, imuPeakUs, imuMaxUs, s.sensorBudgetUs,
-                               s.ultrasonicAvgUs, ultrasonicPeakUs, ultrasonicMaxUs, s.sensorBudgetUs);
+            DebugLog::printf_P(PSTR("imu %u/%u/%u (%u) us\n"),
+                               s.imuAvgUs, imuPeakUs, imuMaxUs, s.sensorBudgetUs);
             break;
         }
         case 15:
@@ -727,22 +707,9 @@ void StatusReporter::emitChunk() {
             break;
         }
         case 17:
-        {
-            char ultrasonicSummary[112];
-            formatRangeSummary(s.ultrasonicConfiguredCount,
-                               s.ultrasonicFoundCount,
-                               s.ultrasonicFound,
-                               s.ultrasonicDistMm,
-                               SENSOR_MAX_ULTRASONICS,
-                               ultrasonicSummary,
-                               sizeof(ultrasonicSummary));
-            DebugLog::printf_P(PSTR("Ultrasonic: %s\n"), ultrasonicSummary);
-            break;
-        }
-        case 18:
             DebugLog::printf_P(PSTR("\n[UART]\n"));
             break;
-        case 19:
+        case 18:
             DebugLog::printf_P(PSTR("activity rxB/frame/tlv/hb=%u/%u/%u/%u txB/frame=%u/%u\n"),
                                s.rxBytesWindow, s.rxFramesWindow, s.rxTlvsWindow, s.rxHeartbeatsWindow,
                                s.txBytesWindow, s.txFramesWindow);

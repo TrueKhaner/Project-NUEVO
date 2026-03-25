@@ -63,6 +63,14 @@ public:
     virtual int32_t getCount() const = 0;
 
     /**
+     * @brief Atomically snapshot encoder count and last edge timestamp.
+     *
+     * This is the preferred API for loop-side velocity feedback on AVR so
+     * 32-bit ISR-updated values are read coherently.
+     */
+    virtual void snapshot(int32_t &count, uint32_t &lastEdgeUs) const = 0;
+
+    /**
      * @brief Reset encoder count to zero
      */
     virtual void resetCount() = 0;
@@ -132,6 +140,7 @@ public:
 
     void init(uint8_t pinA, uint8_t pinB, bool invertDir = false) override;
     int32_t getCount() const override;
+    void snapshot(int32_t &count, uint32_t &lastEdgeUs) const override;
     void resetCount() override;
     void setCount(int32_t count) override;
     void onInterruptA() override;
@@ -180,6 +189,7 @@ public:
 
     void init(uint8_t pinA, uint8_t pinB, bool invertDir = false) override;
     int32_t getCount() const override;
+    void snapshot(int32_t &count, uint32_t &lastEdgeUs) const override;
     void resetCount() override;
     void setCount(int32_t count) override;
     void onInterruptA() override;

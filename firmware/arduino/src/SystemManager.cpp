@@ -120,9 +120,7 @@ void SystemManager::triggerSafetyFaultFromIsr(uint8_t triggerFlags) {
 }
 
 bool SystemManager::canEnableDriveActuator() {
-    SystemState st = getState();
-    return SensorManager::isBatteryPresent() &&
-           (st == SYS_STATE_IDLE || st == SYS_STATE_RUNNING);
+    return canRunDriveActuator();
 }
 
 bool SystemManager::canRunDriveActuator() {

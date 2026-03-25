@@ -15,7 +15,7 @@ static const uint16_t kBudgets[LOOP_SLOT_COUNT] = {
        STEPPER_ISR_UART_BUDGET_US,  // SLOT_STEPPER_ISR (10kHz, 100µs period)
      5000,  // SLOT_MOTOR_TASK  (200Hz soft task)
      8000,  // SLOT_SENSOR_ISR  (100Hz soft task; includes I2C/ADC time)
-    20000,  // SLOT_UART_TASK   (50Hz, 20ms period; includes ISR preemption)
+    UART_TASK_BUDGET_US,  // SLOT_UART_TASK   (100Hz, 10ms period; includes ISR preemption)
     40000,  // SLOT_USERIO      (20Hz,  50ms period)
 };
 

@@ -22,6 +22,8 @@
     "DC_PID_REQ":            21,
     "DC_PID_RSP":            22,
     "DC_PID_SET":            23,
+    "DC_RESET_POSITION":     24,
+    "DC_HOME":               25,
 
     "STEP_ENABLE":           32,
     "STEP_MOVE":             33,
@@ -68,6 +70,8 @@
     "DC_PID_REQ":            "RPi → Arduino: Request PID gains for one DC motor loop.",
     "DC_PID_RSP":            "Arduino → RPi: PID gains for one DC motor loop.",
     "DC_PID_SET":            "RPi → Arduino: Set PID gains for one DC motor loop.",
+    "DC_RESET_POSITION":     "RPi → Arduino: Reset one DC motor encoder position to zero.",
+    "DC_HOME":               "RPi → Arduino: Run DC motor homing toward its configured home limit.",
 
     "STEP_ENABLE":           "RPi → Arduino: Enable/disable a stepper motor driver.",
     "STEP_MOVE":             "RPi → Arduino: Move stepper to absolute position or by relative steps.",

@@ -13,13 +13,19 @@
 #include "../config.h"
 #include <math.h>
 
+namespace {
+constexpr float kPi = 3.14159265358979323846f;
+constexpr float kTwoPi = 2.0f * kPi;
+constexpr float kInitialThetaRad = INITIAL_THETA * kPi / 180.0f;
+}
+
 // ============================================================================
 // STATIC MEMBER INITIALIZATION
 // ============================================================================
 
 float   RobotKinematics::x_             = 0.0f;
 float   RobotKinematics::y_             = 0.0f;
-float   RobotKinematics::theta_         = 0.0f;
+float   RobotKinematics::theta_         = kInitialThetaRad;
 float   RobotKinematics::vx_            = 0.0f;
 float   RobotKinematics::vy_            = 0.0f;
 float   RobotKinematics::vTheta_        = 0.0f;
@@ -38,14 +44,12 @@ static_assert(ODOM_LEFT_MOTOR  != ODOM_RIGHT_MOTOR, "ODOM_LEFT_MOTOR and ODOM_RI
 // mm-per-tick conversion factors (computed once at compile time)
 // ============================================================================
 
-// Encoder mode per motor — maps motor index to 2x or 4x counting multiplier
-static const uint8_t kEncModes[4] = {
-    ENCODER_1_MODE, ENCODER_2_MODE, ENCODER_3_MODE, ENCODER_4_MODE
+constexpr float kMmPerTick[4] = {
+    (kPi * WHEEL_DIAMETER_MM) / (float)(ENCODER_PPR * ENCODER_1_MODE),
+    (kPi * WHEEL_DIAMETER_MM) / (float)(ENCODER_PPR * ENCODER_2_MODE),
+    (kPi * WHEEL_DIAMETER_MM) / (float)(ENCODER_PPR * ENCODER_3_MODE),
+    (kPi * WHEEL_DIAMETER_MM) / (float)(ENCODER_PPR * ENCODER_4_MODE)
 };
-
-static inline float mmPerTick(uint8_t motorIdx) {
-    return (M_PI * WHEEL_DIAMETER_MM) / (float)(ENCODER_PPR * kEncModes[motorIdx]);
-}
 
 // ============================================================================
 // PUBLIC API
@@ -54,11 +58,19 @@ static inline float mmPerTick(uint8_t motorIdx) {
 void RobotKinematics::reset(int32_t leftTicks, int32_t rightTicks) {
     x_              = 0.0f;
     y_              = 0.0f;
-    theta_          = 0.0f;
+    theta_          = kInitialThetaRad;
     vx_             = 0.0f;
     vy_             = 0.0f;
     vTheta_         = 0.0f;
     prevLeftTicks_  = leftTicks;
+    prevRightTicks_ = rightTicks;
+}
+
+void RobotKinematics::reseed(int32_t leftTicks, int32_t rightTicks) {
+    vx_ = 0.0f;
+    vy_ = 0.0f;
+    vTheta_ = 0.0f;
+    prevLeftTicks_ = leftTicks;
     prevRightTicks_ = rightTicks;
 }
 
@@ -67,13 +79,21 @@ void RobotKinematics::update(int32_t leftTicks, int32_t rightTicks,
 {
     // ---- Odometry integration ----
     int32_t dL = leftTicks  - prevLeftTicks_;
+    if (ODOM_LEFT_MOTOR_DIR_INVERTED){
+        dL = -dL;
+    }
+
     int32_t dR = rightTicks - prevRightTicks_;
+    if (ODOM_RIGHT_MOTOR_DIR_INVERTED){
+        dR = -dR;
+    }
+
     prevLeftTicks_  = leftTicks;
     prevRightTicks_ = rightTicks;
 
     if (dL != 0 || dR != 0) {
-        float dLeft   = (float)dL * mmPerTick(ODOM_LEFT_MOTOR);
-        float dRight  = (float)dR * mmPerTick(ODOM_RIGHT_MOTOR);
+        float dLeft   = (float)dL * kMmPerTick[ODOM_LEFT_MOTOR];
+        float dRight  = (float)dR * kMmPerTick[ODOM_RIGHT_MOTOR];
         float dCenter = (dLeft + dRight) * 0.5f;
         float dTheta  = (dRight - dLeft) / WHEEL_BASE_MM;
 
@@ -81,12 +101,19 @@ void RobotKinematics::update(int32_t leftTicks, int32_t rightTicks,
         float headingMid = theta_ + dTheta * 0.5f;
         x_     += dCenter * cosf(headingMid);
         y_     += dCenter * sinf(headingMid);
-        theta_ += dTheta;
+        theta_ = theta_ + dTheta; // We intentionally NOT mod theta to 2 PI here.
     }
 
     // ---- Instantaneous body-frame velocities ----
-    float vLeft  = leftVelTps  * mmPerTick(ODOM_LEFT_MOTOR);
-    float vRight = rightVelTps * mmPerTick(ODOM_RIGHT_MOTOR);
+    if (ODOM_LEFT_MOTOR_DIR_INVERTED) {
+        leftVelTps = -leftVelTps;
+    }
+    if (ODOM_RIGHT_MOTOR_DIR_INVERTED) {
+        rightVelTps = -rightVelTps;
+    }
+
+    float vLeft  = leftVelTps  * kMmPerTick[ODOM_LEFT_MOTOR];
+    float vRight = rightVelTps * kMmPerTick[ODOM_RIGHT_MOTOR];
 
     vx_     = (vLeft + vRight) * 0.5f;
     vy_     = 0.0f;  // Always 0 for differential drive

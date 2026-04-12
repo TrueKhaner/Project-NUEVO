@@ -153,7 +153,11 @@ def _drive_circle(robot: Robot, rec: _Record) -> None:
         if elapsed >= total_duration:
             break
 
-        x, y, odom_deg = robot.get_pose()
+        x, y, _ = robot.get_pose()
+        # Raw odometry theta direct from firmware (reset to 0 by reset_odometry()).
+        with robot._lock:
+            odom_deg = math.degrees(robot._pose[2])
+        # Fused heading zeroed to 0 at reset_odometry() via _fused_theta_offset.
         fused_deg = robot.get_fused_orientation()
         rec.append(elapsed, x, y, odom_deg, fused_deg)
 

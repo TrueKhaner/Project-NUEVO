@@ -203,9 +203,10 @@ class Robot:
         self._servo_state: ServoStateAll = None
         self._io_output_state: IOOutputState = None
         self._imu:        SensorImu      = None
-        self._mag_heading:  float | None = None   # absolute heading from AHRS (rad)
-        self._fused_theta:  float        = 0.0    # fusion strategy output (rad)
-        self._fusion: SensorFusion       = ComplementaryFilter(alpha=0.02)
+        self._mag_heading:      float | None = None   # absolute heading from AHRS (rad)
+        self._fused_theta:      float        = 0.0    # fusion strategy output (rad)
+        self._fused_theta_offset: float      = 0.0    # heading at last reset_odometry(); zeroes fused heading
+        self._fusion: SensorFusion           = ComplementaryFilter(alpha=0.02)
         self._pose:    tuple = (0.0, 0.0, 0.0)  # x_mm, y_mm, theta_rad (raw odometry)
         # ── GPS position fusion ───────────────────────────────────────────────
         self._tracked_tag_id:    int         = -1    # tag to track (-1 = any)
@@ -522,7 +523,13 @@ class Robot:
         return self.set_state(FirmwareState.IDLE)
 
     def reset_odometry(self) -> None:
-        """Reset firmware odometry pose to (0, 0, current initial theta)."""
+        """Reset firmware odometry pose to (0, 0, current initial theta).
+
+        Also zeroes the fused heading so that get_fused_orientation() and
+        get_pose()[2] share the same reference frame after the reset.
+        """
+        with self._lock:
+            self._fused_theta_offset = self._fused_theta
         msg = SysOdomReset()
         msg.flags = 0
         self._odom_pub.publish(msg)
@@ -1488,7 +1495,7 @@ class Robot:
         ``mag_calibrated = True``. Before calibration, returns odometry theta.
         """
         with self._lock:
-            return math.degrees(self._fused_theta)
+            return math.degrees(self._fused_theta - self._fused_theta_offset)
 
     def set_fusion_strategy(self, strategy: SensorFusion) -> None:
         """
@@ -1829,7 +1836,8 @@ class Robot:
     def _get_pose_mm(self) -> tuple[float, float, float]:
         """Return fused (x_mm, y_mm, theta_rad) without unit conversion."""
         with self._lock:
-            return (self._fused_x_mm, self._fused_y_mm, self._fused_theta)
+            return (self._fused_x_mm, self._fused_y_mm,
+                    self._fused_theta - self._fused_theta_offset)
 
     def _get_obstacles_mm(self) -> list[tuple[float, float]]:
         """Return cached and provider-supplied APF obstacles in robot-frame millimeters."""

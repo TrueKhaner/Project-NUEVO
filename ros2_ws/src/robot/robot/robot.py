@@ -1633,6 +1633,13 @@ class Robot:
         )
 
     def _nav_follow_path_loop(self, path, period: float):
+        # BUG (race condition + permanent mutation): self._obstacles_mm is written by
+        # _on_lidar under self._lock, but read and overwritten here without the lock.
+        # Additionally, writing the rotated result back to self._obstacles_mm means the
+        # 180° correction accumulates across loop iterations: if the loop fires twice
+        # before the next lidar scan, the obstacles are rotated 360° (no-op), then 180°
+        # on the third call, oscillating between correct and mirrored positions.
+        # Fix: copy under the lock and apply the rotation to a local variable only.
         if self._obstacles_mm.size != 0:
             # lidar orientation due to installation is 180 deg rotated from robot forward, so rotate obstacles accordingly
             self._obstacles_mm = (np.array([[np.cos(np.pi), -np.sin(np.pi)], [np.sin(np.pi), np.cos(np.pi)]]).T @ self._obstacles_mm.T).T

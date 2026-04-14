@@ -1,14 +1,6 @@
 """
 obstacle_avoidance.py — DWA-based obstacle avoidance example
 =============================================================
-Restored from commit 8894254 (added obstacle avoidance).
-
-Known issues (do not fix here — see comments):
-  - robot._nav_follow_dwa_path() passes mm values to a planner that expects SI units.
-  - robot._nav_follow_path_loop() passes an extra `period` argument that DWAPlanner
-    does not accept; will raise TypeError at runtime.
-  - robot._draw_lidar_obstacles() requires matplotlib (not imported in robot.py)
-    and treats self._obstacles_mm as a numpy array when it is a list.
 """
 
 from __future__ import annotations
@@ -84,19 +76,45 @@ def run(robot: Robot) -> None:
                 (2000.0, 2000.0),
             ]
             path = np.float64(densify_polyline(path_control_points, spacing=400.0))
+            # ----------------------------------------------------------------
+            # DWA parameter guide
+            #
+            # sample resolution vs. dynamic window width
+            #   DW width = 2 * max_acc * period = 2 * 400 * 0.02 = 16 mm/s
+            #   Using a step > DW width produces only 1 sample → no optimisation.
+            #   Rule: step << DW_width.  Here 3 mm/s gives ~5 linear samples.
+            #
+            # gain_obs_base tuning
+            #   obs_cost = 1 / dist_m.  For a 400mm obstacle: obs_cost ≈ 2.5.
+            #   goal_cost for a 1m path detour ≈ 1.0.
+            #   Break-even: gain_obs * 2.5  ==  gain_goal * 1.0
+            #                      gain_obs  ==  2.0 / 2.5 ≈ 0.8  (minimum)
+            #   Use 4.0 so obstacle avoidance actively steers early, not just at
+            #   the collision boundary.
+            #
+            # obstacles_range_mm
+            #   Must exceed v_max * predict_time + lidar_offset so trajectories
+            #   are checked against all reachable obstacles.
+            #   min = 300 * 2.0 + 100 = 700 mm → use 800 mm.
+            #
+            # gain_speed
+            #   Penalises stopping (cost = -v / 1000).  A high value (1.0)
+            #   overrides obstacle avoidance and keeps the robot at full speed
+            #   into obstacles.  Lower to 0.1.
+            # ----------------------------------------------------------------
             robot._nav_follow_dwa_path(
                 max_vel_mm=300.0,
                 max_acc_mm=400.0,
                 max_angular_rad=0.8,
                 max_angular_acc_rad=1.5,
                 lookahead_mm=200.0,
-                advance_radius_mm=100.0,
+                advance_radius_mm=150.0,
                 tolerance_mm=100.0,
-                gains_of_costs=[2.0, 0.01, 0.1, 1.0, 0.1], # [gain_goal, gain_heading, gain_obs_base, gain_speed, gain_path]
+                gains_of_costs=[2.0, 0.05, 4.0, 0.1, 0.2], # [gain_goal, gain_heading, gain_obs_base, gain_speed, gain_path]
                 period=period,
                 predict_time=2.0,
-                predict_velocity_samples_resolution=[20.0, 0.1],
-                obstacles_range_mm=500.0,
+                predict_velocity_samples_resolution=[3.0, 0.01],
+                obstacles_range_mm=800.0,
                 ttc_weight=0.1,
             )
             print("Path is ready, Entering IDLE state.")

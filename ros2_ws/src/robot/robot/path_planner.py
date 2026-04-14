@@ -334,8 +334,7 @@ class DWAPlanner():
             # transform obstacles from robot frame to world frame.
             obstacles = (np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]) @ obstacles.T).T + np.array([[x, y],])
             dists = np.linalg.norm(obstacles-np.float64([[x, y]]), axis=1)
-            obstacles = obstacles[dists<self.obstacles_range,:]
-            # obstacles = obstacles[(dists >= self.robot_radius) & (dists < self.obstacles_range)]
+            obstacles = obstacles[(dists >= self.robot_radius) & (dists < self.obstacles_range)]
 
             # print(f"Min distance: {np.min(dists):.4f}")
         vx, vy, w = velocity

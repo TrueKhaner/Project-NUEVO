@@ -85,21 +85,16 @@ def run(robot: Robot) -> None:
                 (2000.0, 2000.0),
             ]
             path = np.float64(densify_polyline(path_control_points, spacing=500.0))
-            robot._nav_follow_dwa_path(
-                max_vel_mm=200.0,
-                max_acc_mm=300.0,
-                max_angular_rad=1.0,
-                max_angular_acc_rad=2.0,
-                lookahead_mm=200.0,
-                advance_radius_mm=150.0,
-                tolerance_mm=100.0,
-                gains_of_costs=[2.0, 0.02, 0.2, 0.5, 0.1], # [gain_goal, gain_heading, gain_obs_base, gain_speed, gain_path]
-                period=period,
-                predict_time=3.0,
-                predict_velocity_samples_resolution=[10.0, 0.1],
-                obstacles_range_mm=1000.0,
-                ttc_weight=0.1,
+            robot._nav_follow_pp_path(
+                lookahead_distance=200.0,
+                max_linear_speed=200.0,
+                goal_tolerance=100.0,
+                obstacles_range=1000.0,
+                safe_dist=150.0,
+                sharp_angle=math.pi / 3,
+                alpha=0.5,
             )
+            robot._set_pp_path(path)
             print("Path is ready, Entering IDLE state.")
             state = "IDLE"
 
@@ -117,7 +112,7 @@ def run(robot: Robot) -> None:
             # if next_tick % 0.5 < period: # print every half second
             #     robot._draw_lidar_obstacles()
             #     print("Obstacle figure updated.")
-            state = robot._nav_follow_path_loop(path, period)
+            state = robot._nav_follow_pp_path_loop()
 
         # FSM refresh rate control
         next_tick += period

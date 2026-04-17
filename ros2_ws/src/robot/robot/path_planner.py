@@ -141,6 +141,154 @@ class PurePursuitPlanner(PathPlanner):
         return dist_to_target < self.goal_tolerance
 
 
+class PurePursuitPlannerWithAvoidance(PathPlanner):
+    def __init__(self,
+            lookahead_distance: float=100.0,
+            max_linear_speed: float=100.0,
+            goal_tolerance: float=20.0,
+            obstacles_range: float=300.0,
+            safe_dist: float=200.0,
+            sharp_angle: float=np.pi/2,
+            alpha: float=0.8):
+        self.Ld = lookahead_distance
+        self.raw_LD = lookahead_distance
+        self.v_max = max_linear_speed  # mm/s
+        self.goal_tolerance = goal_tolerance
+        self.obstacles_range = obstacles_range
+        self.safe_dist = safe_dist
+        self.sharp_angle = sharp_angle
+        self.alpha = alpha
+        self.avoidance_active = False
+
+    def set_path(self, path: list[tuple[float, float]]):
+        self.remaining_path = path.copy()
+        self.raw_path = path.copy()
+
+    def _advance_remaining_path(self,
+        x: float,
+        y: float,
+    ) -> list[tuple[float, float]]:
+        
+        while len(self.remaining_path) > 1:
+            next_x_mm, next_y_mm = self.remaining_path[0]
+            if np.hypot(x-next_x_mm, y-next_y_mm) > self.Ld:
+                break
+            self.remaining_path.pop(0)
+        return self.remaining_path
+
+    def _lookahead_point(self, path, x, y):
+        path = np.array(path)
+        position = np.array([x, y])
+
+        for i in range(len(path)):
+            dist = np.linalg.norm(path[i,:] - position)
+            if dist >= self.Ld:
+                return path[i]
+
+        return path[-1]
+    
+    def TargetReached(self, path, x, y):
+        goal_x, goal_y = path[0]
+        dist_to_goal = np.hypot(goal_x - x, goal_y - y)
+        return (dist_to_goal < self.goal_tolerance)
+
+    def compute_velocity(self, pose, obstacles_r: np.nparray):
+        # Note that the input obstacle point cloud is in robot frame
+        x, y, theta = pose
+        self._advance_remaining_path(x,y)
+        
+        if self.TargetReached(self.remaining_path,x,y):
+            return 0.0, 0.0  # Stop if within goal tolerance
+
+        if len(obstacles_r) > 0:
+            # lidar orientation due to installation is 180 deg rotated from robot forward, so rotate obstacles accordingly
+            # there is a distance between the lidar and the robot center.
+            obstacles_r = (np.array([[np.cos(np.pi), -np.sin(np.pi)], [np.sin(np.pi), np.cos(np.pi)]]) @ obstacles_r.T).T 
+            
+            # since some robot parts (e.g., the arm) may cause obstacles to be detected, we can filter out those obstacles behind the lidar.
+            obstacles_r = obstacles_r[obstacles_r[:,0]>0]
+
+            # consider the lidar offset from the robot center
+            # lidar_offset_mm = 100.0
+            # obstacles_r = obstacles_r + np.array([[lidar_offset_mm, 0],])
+
+            dists = np.linalg.norm(obstacles_r, axis=1)
+            obstacles_r = obstacles_r[(dists < self.obstacles_range)] # only consider obstacles inside range
+
+            # transform obstacles from robot frame to world frame.
+            obstacles = (np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]) @ obstacles_r.T).T + np.array([[x, y],])
+
+            if len(obstacles_r) > 0:
+                # if desired path is close to obstacles, remove it.
+                if (self.remaining_path[0] in self.raw_path) and np.any(np.sqrt(np.sum((np.float64([self.remaining_path[0]])-obstacles)**2, 1)) < self.safe_dist):
+                    self.remaining_path.pop(0)
+
+                dists = np.linalg.norm(obstacles_r, axis=1)
+                min_dist = np.min(dists)
+                closest_pt = obstacles_r[np.argmin(dists),:] # closest obstacle point in robot frame
+
+                angle = np.arctan2(closest_pt[1],closest_pt[0]) + theta # angle of the obstacle in world frame
+                if min_dist < self.safe_dist:
+                    delta_angle = self.sharp_angle # turn sharply if the robot is close to the obstacle
+                else:
+                    delta_angle = 2*np.abs(np.arctan2(self.safe_dist/2, np.sqrt(min_dist**2 - (self.safe_dist/2)**2)))
+                
+                # find the closest waypoint on the desired path
+                target = self.raw_path[-1]
+                for i in range(len(self.remaining_path)):
+                    if self.remaining_path[i] in self.raw_path:
+                        target = self.remaining_path[i]
+                        break
+
+                # Two candidate waypoints in +- orientations
+                candidate_waypoint1 = (x+min_dist*np.cos(angle+delta_angle), y+min_dist*np.sin(angle+delta_angle)) # left turn
+                candidate_waypoint2 = (x+min_dist*np.cos(angle-delta_angle), y+min_dist*np.sin(angle-delta_angle)) # left right
+
+                # In avoidance mode, we should romove the previous added waypoint
+                if self.avoidance_active:
+                    self.remaining_path.pop(0)
+
+                # find the candidate waypoints which is close to the desired path.
+                if np.hypot(target[0]-candidate_waypoint1[0], target[1]-candidate_waypoint1[1]) < np.hypot(target[0]-candidate_waypoint2[0], target[1]-candidate_waypoint2[1]):
+                    self.remaining_path.insert(0, candidate_waypoint1)
+                    self.avoidance_active = True
+                else:
+                    self.remaining_path.insert(0, candidate_waypoint2)
+                    self.avoidance_active = True
+
+                # self.Ld = max(self.raw_LD * 0.3, 50.0)
+                self.Ld = self.raw_LD * self.alpha # reduce lookahead distance to track added waypoints more precisely.
+        else:
+            self.Ld = self.raw_LD
+            self.avoidance_active = False
+
+        target = self._lookahead_point(self.remaining_path, x, y)
+
+        tx, ty = target
+
+        dx = tx - x
+        dy = ty - y
+
+        # Transform to robot frame
+        x_r = np.cos(theta) * dx + np.sin(theta) * dy
+        y_r = -np.sin(theta) * dx + np.cos(theta) * dy
+        Dist2Target = np.hypot(x_r, y_r)
+        curvature = 2.0 * y_r / (self.Ld ** 2)
+        # curvature = 2.0 * y_r / (Dist2Target ** 2)
+
+        
+        v = self.v_max / (1.0 + 2.0 * abs(curvature))  # m/s
+        w = curvature * v  # rad/s
+
+        return v, w
+
+    def motion(self, pose, v, w, dt):
+        x, y, theta = pose
+        pose[0] += v * np.cos(theta) * dt
+        pose[1] += v * np.sin(theta) * dt
+        pose[2] += w * dt
+        return pose
+
 
 # =============================================================================
 # Dynamic Window Approach (stub — activated when 2D lidar is ready)
@@ -319,7 +467,7 @@ class DWAPlanner():
             # transform obstacles from robot frame to world frame.
             obstacles = (np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]) @ obstacles.T).T + np.array([[x, y],])
             
-            obstacles = np.float64([(0,1000.0),]) # virtual obstacle for testing
+            # obstacles = np.float64([(0,1000.0),]) # virtual obstacle for testing
             dists = np.linalg.norm(obstacles-np.float64([[x, y]]), axis=1)
             obstacles = obstacles[(dists >= self.robot_radius) & (dists < self.obstacles_range)]
 

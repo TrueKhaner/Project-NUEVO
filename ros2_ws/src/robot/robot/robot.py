@@ -1673,6 +1673,50 @@ class Robot:
 
         return "MOVING"
 
+    def _nav_follow_pp_path(
+        self,
+        lookahead_distance: float,
+        max_linear_speed: float,
+        goal_tolerance: float,
+        obstacles_range: float,
+        safe_dist: float,
+        sharp_angle: float,
+        alpha: float,
+    ) -> None:
+
+        from robot.path_planner import PurePursuitPlannerWithAvoidance
+        self.planner = PurePursuitPlannerWithAvoidance(
+            lookahead_distance=lookahead_distance,
+            max_linear_speed=max_linear_speed,
+            goal_tolerance=goal_tolerance,
+            obstacles_range=obstacles_range,
+            safe_dist=safe_dist,
+            sharp_angle=sharp_angle,
+            alpha=alpha,
+        )
+    
+    def _set_pp_path(self, path):
+        self.planner.set_path(path)
+    
+    def _nav_follow_pp_path_loop(self):
+        with self._lock:
+            obstacles = self._obstacles_mm.copy()
+
+            pose = self._pose
+            # vel = self._vel
+
+        v, w = self.planner.compute_velocity(pose, obstacles)
+        # print(f"Computed velocity: linear={v:.1f} mm/s, angular={math.degrees(w):.1f} deg/s")
+        self.set_velocity(v, math.degrees(w))
+        # print(f"Current Pose: ({pose[0]:.1f}, {pose[1]:.1f}, {math.degrees(pose[2]):.1f} deg)")
+
+        if self.planner.TargetReached(self.planner.remaining_path, pose[0], pose[1]):
+            print("MOVING: Target reached! Stopping.")
+            self.stop()
+            return "IDLE"
+
+        return "MOVING"
+
     def _draw_lidar_obstacles(self):
         with self._lock:
              obstacles_mm = self._obstacles_mm.copy()

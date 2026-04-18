@@ -303,12 +303,19 @@ def _drive_straight(robot: Robot, rec: _Record) -> None:
             break
 
         if dist_traveled >= max_dist:
-            # Safety cap: GPS never found within the extended search range.
-            print(
-                f"[pos_fusion_test] WARNING — GPS was never acquired during the "
-                f"{max_dist:.0f} mm drive. The fused position equals raw odometry "
-                f"throughout; no fusion comparison is available in the plot."
-            )
+            # Safety cap: hit total distance limit before completing the run.
+            if gps_aligned:
+                print(
+                    f"[pos_fusion_test] WARNING — GPS coverage ended before "
+                    f"{DRIVE_DISTANCE_MM:.0f} mm of fused data could be collected. "
+                    f"Increase GPS_SEARCH_EXTRA_MM or reposition the robot closer to the tag."
+                )
+            else:
+                print(
+                    f"[pos_fusion_test] WARNING — GPS was never acquired during the "
+                    f"{max_dist:.0f} mm drive. The fused position equals raw odometry "
+                    f"throughout; no fusion comparison is available in the plot."
+                )
             break
 
         # Warn once when the primary distance is passed without GPS.

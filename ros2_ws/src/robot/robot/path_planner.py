@@ -172,8 +172,8 @@ class PurePursuitPlannerWithAvoidanceLane(PathPlanner):
         self.avoidance_counter = 0
         self.avoidance_delay = avoidance_delay
 
-        # self.current_lane = 'Center'
-        self.current_lane = 'Left'
+        self.current_lane = 'Center'
+        # self.current_lane = 'Left'
 
     def set_path(self, path: list[tuple[float, float]]):
         self.raw_path = path.copy()
@@ -231,8 +231,6 @@ class PurePursuitPlannerWithAvoidanceLane(PathPlanner):
             obstacles_r = (np.array([[np.cos(np.pi), -np.sin(np.pi)], [np.sin(np.pi), np.cos(np.pi)]]) @ obstacles_r.T).T 
             
             # since some robot parts (e.g., the arm) may cause obstacles to be detected, we can filter out those obstacles behind the lidar.
-            # obstacles_r = obstacles_r[obstacles_r[:,0]>0]
-            # obstacles_r = obstacles_r[(obstacles_r[:,0]>0) & (np.abs(obstacles_r[:,1])<self.safe_dist),:]
             obstacles_r = obstacles_r[np.abs(np.arctan2(obstacles_r[:,1],obstacles_r[:,0])) <= self.view_angle,:] # only consider obstacles in front of the robot within 180 deg FOV, which can help prevent the robot from being too conservative by reacting to obstacles behind it that are not in its path.
 
             # consider the lidar offset from the robot center
@@ -254,22 +252,22 @@ class PurePursuitPlannerWithAvoidanceLane(PathPlanner):
                 self.raw_path[0] = ((self.raw_path[0][0]+self.raw_path[1][0])/2, (self.raw_path[0][1]+self.raw_path[1][1])/2)
 
             if (len(obstacles_r) > 0)  and (self.avoidance_counter <= 0):
-                # Step 5: Find the cloest obstacle, and save it to the buffer.
+                # Step 5: Find the cloest obstacle, and decide which lane to switch.
                 dists = np.linalg.norm(obstacles_r, axis=1)
-                min_dist = np.min(dists)
                 arg_dist = np.argmin(dists)
                 closest_pt = obstacles[arg_dist,:] # closest obstacle point in world frame
 
                 change_lane = False
                 if (closest_pt[0] < self.x_w and self.current_lane!='Right') or (closest_pt[0] > self.x_w and self.current_lane!='Left'):
                     change_lane = True
-                    print('Change Lane!!!', self.current_lane)
                     # reduce lookahead distance to track added waypoints more precisely.
                     self.Ld = self.raw_LD * self.alpha_Ld
 
                     # keep avoidance active for a few cycles to ensure the robot reacts to the obstacle.
                     self.avoidance_counter = self.avoidance_delay
                     self.avoidance_active = True
+                
+                # Step 6: Generate new waypoints based on the planned waypoints on the center lane.
                 if change_lane:
                     self.remaining_path = []
                     for i in range(len(self.raw_path)):
@@ -280,6 +278,9 @@ class PurePursuitPlannerWithAvoidanceLane(PathPlanner):
                         else:
                             self.remaining_path.append((x_-self.offset, y_))
                             self.current_lane = 'Left'
+                    
+                    print('Change Lane!!!', self.current_lane)
+                    
                     if np.hypot(x-closest_pt[0], y-closest_pt[1]) < (self.safe_dist+self.obstacles_range)/2:
                         print('Too Closed!!!')
                         if self.current_lane == 'Right':

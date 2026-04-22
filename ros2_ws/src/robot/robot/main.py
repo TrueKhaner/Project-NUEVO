@@ -67,33 +67,33 @@ def run(robot: Robot) -> None:
             start_robot(robot)
             print("[FSM] INIT (odometry reset)")
             # center lane
-            # path_control_points = [
-            #     (0.0,   0.0),
-            #     (0.0, 2500.0),
-            #     (1000.0, 2500.0),
-            # ]
-            # left lane
             path_control_points = [
-                (300.0,   0.0),
-                (300.0, 2500.0),
-                (1300.0, 2500.0),
+                (0.0,   0.0),
+                (0.0, 2500.0),
+                (1000.0, 2500.0),
             ]
+            # left lane
+            # path_control_points = [
+            #     (300.0,   0.0),
+            #     (300.0, 2500.0),
+            #     (1300.0, 2500.0),
+            # ]
 
-            path = densify_polyline(path_control_points, spacing=300.0)
+            path = densify_polyline(path_control_points, spacing=400.0)
 
             robot._nav_follow_pp_path_lane(
                 lookahead_distance=100.0,
-                max_linear_speed=130.0,
+                max_linear_speed=140.0,
                 max_angular_speed=1.5,
                 goal_tolerance=20.0,
                 obstacles_range=450.0,
                 view_angle=math.radians(70.0),
-                safe_dist=240.0,
+                safe_dist=250.0,
                 avoidance_delay=150,
-                alpha_Ld=0.8,
+                alpha_Ld=0.7,
                 offset=270.0,
                 obstacle_avoidance=True,
-                x_w=300.0,
+                x_w=0.0,
             )
             robot._set_pp_path(path)
             print("Path is ready, Entering IDLE state.")

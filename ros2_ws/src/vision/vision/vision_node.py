@@ -18,6 +18,8 @@ from vision.model_utils import (
 )
 from vision.rule_based_detection import (
     detect_yellow_block,
+    detect_trash_cans,
+    detect_paper_balls,
 )
 from vision.stop_sign import classify_stop_sign_visibility
 from vision.timing_utils import FixedRateScheduler
@@ -100,8 +102,13 @@ class VisionNode(Node):
         self._ncnn_threads = int(self.get_parameter("ncnn_threads").value)
         self._reconnect_delay_sec = max(0.1, float(self.get_parameter("reconnect_delay_sec").value))
         self._log_interval_sec = max(1.0, float(self.get_parameter("log_interval_sec").value))
+        self._debug_output_dir = str(self.get_parameter("debug_output_dir").value)
 
-        self._publisher = self.create_publisher(VisionDetectionArray, "/vision/detections", 10)
+        namespace_name = self.get_namespace().strip("/")
+        if namespace_name:
+            self._debug_output_dir = str(Path(self._debug_output_dir) / namespace_name)
+
+        self._publisher = self.create_publisher(VisionDetectionArray, "vision/detections", 10)
         self._camera = ManagedCamera(
             device=self._camera_device,
             width=self._camera_width,
@@ -113,7 +120,7 @@ class VisionNode(Node):
         )
         self._debug_writer = DetectionDebugWriter(
             enabled=bool(self.get_parameter("debug_save_enabled").value),
-            output_dir=str(self.get_parameter("debug_output_dir").value),
+            output_dir=self._debug_output_dir,
             save_rate_hz=float(self.get_parameter("debug_save_rate_hz").value),
             save_only_on_detection=bool(self.get_parameter("debug_save_only_on_detection").value),
             save_latest=bool(self.get_parameter("debug_save_latest").value),
@@ -138,7 +145,7 @@ class VisionNode(Node):
             ncnn_threads=self._ncnn_threads,
         )
         self.get_logger().info(
-            "Loaded NCNN YOLO model path=%s max_imgsz=%d classes=%d filter=%s ncnn_threads=%s confidence=%.2f yellow_block=%s"
+            "Loaded NCNN YOLO model path=%s max_imgsz=%d classes=%d filter=%s ncnn_threads=%s confidence=%.2f yellow_block=%s trash_can=%s paper_ball=%s"
             % (
                 model_path,
                 self._model_imgsz,
@@ -146,6 +153,8 @@ class VisionNode(Node):
                 self._class_filter or "all",
                 self._ncnn_threads if self._ncnn_threads > 0 else "auto",
                 self._confidence_threshold,
+                "on",
+                "on",
                 "on",
             )
         )
@@ -156,6 +165,12 @@ class VisionNode(Node):
     def _detect_yellow_block(self, frame):
         return detect_yellow_block(frame)
 
+    def _detect_trash_cans(self, frame):
+        return detect_trash_cans(frame)
+
+    def _detect_paper_balls(self, frame):
+        return detect_paper_balls(frame)
+
     def _build_detection_msg(self, detected_object: DetectedObject) -> VisionDetection:
         detection = VisionDetection()
         detection.class_name = detected_object.class_name
@@ -164,10 +179,12 @@ class VisionNode(Node):
         detection.y = int(detected_object.y)
         detection.width = int(detected_object.width)
         detection.height = int(detected_object.height)
+
         for attribute in detected_object.attributes:
             detection.attribute_names.append(attribute.name)
             detection.attribute_values.append(attribute.value)
             detection.attribute_scores.append(float(attribute.score))
+
         return detection
 
     def _build_detection_array_msg(
@@ -179,11 +196,13 @@ class VisionNode(Node):
     ) -> VisionDetectionArray:
         message = VisionDetectionArray()
         message.header.stamp = capture_stamp
-        message.header.frame_id = "vision_camera"
+        message.header.frame_id = self.get_namespace().strip("/") or "vision_camera"
         message.image_width = int(image_width)
         message.image_height = int(image_height)
+
         for detected_object in detected_objects:
             message.detections.append(self._build_detection_msg(detected_object))
+
         return message
 
     def run(self) -> None:
@@ -191,13 +210,14 @@ class VisionNode(Node):
 
         while rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.0)
+
             if not self._camera.ensure():
                 scheduler.reset()
                 continue
 
             scheduler.wait_until_ready()
 
-            ok, frame = self._camera.read() # frame is a numpy array
+            ok, frame = self._camera.read()
             if not ok or frame is None:
                 self._camera.handle_read_failure()
                 scheduler.reset()
@@ -205,10 +225,13 @@ class VisionNode(Node):
 
             capture_stamp = self.get_clock().now().to_msg()
             inference_start = time.monotonic()
+
             try:
                 yolo_detections = self._infer_yolo_detections(frame)
                 yellow_block_detections, yellow_block_overlays = self._detect_yellow_block(frame)
-                
+                trash_can_detections, trash_can_overlays = self._detect_trash_cans(frame)
+                paper_ball_detections, paper_ball_overlays = self._detect_paper_balls(frame)
+
                 for detection in yolo_detections:
                     object_crop = frame[
                         detection.y : detection.y + detection.height,
@@ -218,21 +241,30 @@ class VisionNode(Node):
                     if detection.class_name == "traffic light":
                         traffic_light_crop = object_crop
                         color_label, color_score = classify_traffic_light_color(traffic_light_crop)
-                        
-                        # Add attribute to the detection result; we add color here as an example
                         detection.add_attribute("color", color_label, color_score)
 
                     elif detection.class_name == "stop sign":
                         stop_sign_crop = object_crop
                         visibility_label, visibility_score = classify_stop_sign_visibility(stop_sign_crop)
                         detection.add_attribute("visibility", visibility_label, visibility_score)
-                        
+
                     elif detection.class_name == "person":
                         person_crop = object_crop
                         face_lighting_label, face_lighting_score = classify_person_face_lighting(person_crop)
                         detection.add_attribute("face_lighting", face_lighting_label, face_lighting_score)
-                
-                all_detections = yolo_detections + yellow_block_detections
+
+                all_detections = (
+                    yolo_detections
+                    + yellow_block_detections
+                    + trash_can_detections
+                    + paper_ball_detections
+                )
+
+                all_debug_overlays = (
+                    yellow_block_overlays
+                    + trash_can_overlays
+                    + paper_ball_overlays
+                )
 
                 message = self._build_detection_array_msg(
                     capture_stamp=capture_stamp,
@@ -241,26 +273,34 @@ class VisionNode(Node):
                     detected_objects=all_detections,
                 )
                 self._publisher.publish(message)
+
                 self._debug_writer.maybe_write(
                     frame_bgr=frame,
                     detected_objects=all_detections,
-                    debug_overlays=yellow_block_overlays,
+                    debug_overlays=all_debug_overlays,
                 )
+
                 yolo_count = len(yolo_detections)
                 yellow_block_count = len(yellow_block_detections)
+                trash_can_count = len(trash_can_detections)
+                paper_ball_count = len(paper_ball_detections)
                 detection_count = len(message.detections)
+
             except Exception as exc:
                 self.get_logger().error(f"Vision inference failed for one frame: {exc}")
                 yolo_count = 0
                 yellow_block_count = 0
+                trash_can_count = 0
+                paper_ball_count = 0
                 detection_count = 0
+
             inference_ms = (time.monotonic() - inference_start) * 1000.0
 
             now = time.monotonic()
             if now - self._last_loop_summary >= self._log_interval_sec:
                 self._last_loop_summary = now
                 self.get_logger().info(
-                    "Vision frame %dx%d total=%.1fms preprocess=%.1fms ncnn=%.1fms postprocess=%.1fms yolo=%d yellow_block=%d total=%d target_rate=%.1fHz"
+                    "Vision frame %dx%d total=%.1fms preprocess=%.1fms ncnn=%.1fms postprocess=%.1fms yolo=%d yellow_block=%d trash_can=%d paper_ball=%d total=%d target_rate=%.1fHz"
                     % (
                         frame.shape[1],
                         frame.shape[0],
@@ -270,6 +310,8 @@ class VisionNode(Node):
                         self._detector.last_postprocess_ms,
                         yolo_count,
                         yellow_block_count,
+                        trash_can_count,
+                        paper_ball_count,
                         detection_count,
                         self._process_rate_hz,
                     )
@@ -283,6 +325,7 @@ class VisionNode(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = VisionNode()
+
     try:
         node.run()
     finally:

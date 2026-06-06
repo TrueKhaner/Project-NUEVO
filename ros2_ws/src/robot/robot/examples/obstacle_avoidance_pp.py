@@ -1,23 +1,8 @@
-"""
-obstacle_avoidance.py — current lane-switch obstacle avoidance reference
-========================================================================
-Reference example for the obstacle-avoidance path that is currently used by the
-released Lab 5 robot flow.
-
-How to run:
-    cp examples/obstacle_avoidance.py main.py
-    ros2 run robot robot
-
-This example is intentionally close to the released lab behavior, but lives in
-`examples/` so the supported obstacle-avoidance configuration is documented in
-one place without editing each student's `main.py`.
-"""
-
 from __future__ import annotations
 
 import math
 import time
-
+import numpy as np
 from robot.hardware_map import (
     Button,
     DEFAULT_FSM_HZ,
@@ -34,8 +19,16 @@ from robot.hardware_map import (
 from robot.robot import FirmwareState, Robot
 from robot.util import densify_polyline
 
-
 TAG_ID = 11
+
+# Basic tuning parameters
+LINEAR_SPEED = 120.0
+MAX_ANGULAR = 1.5  # radians/sec
+SAFE_DIST = 250.0  # how close to walls before correction
+LOOKAHEAD = 100.0  # pure pursuit
+WAYPOINT_TOL = 20.0
+DEBUG_PRINT_POINTS = 10  # number of points to show
+
 def configure_robot(robot: Robot) -> None:
     robot.set_unit(POSITION_UNIT)
     robot.set_odometry_parameters(
@@ -51,22 +44,44 @@ def configure_robot(robot: Robot) -> None:
     robot.enable_gps()
     robot.set_tracked_tag_id(TAG_ID)
 
-
 def show_idle_leds(robot: Robot) -> None:
     robot.set_led(LED.GREEN, 0)
     robot.set_led(LED.ORANGE, 255)
 
-
 def show_moving_leds(robot: Robot) -> None:
     robot.set_led(LED.ORANGE, 0)
     robot.set_led(LED.GREEN, 255)
-
 
 def start_robot(robot: Robot) -> None:
     robot.set_state(FirmwareState.RUNNING)
     robot.reset_odometry()
     robot.wait_for_pose_update(timeout=0.2)
 
+def get_lidar_points(robot: Robot):
+    # SDK handles points internally
+    if hasattr(robot, "_lidar_points"):
+        return np.asarray(robot._lidar_points, dtype=float)
+    return np.zeros((0,2))
+
+def compute_wall_repulsion(lidar_pts):
+    """Simple repulsion logic to maintain roughly straight path"""
+    if len(lidar_pts) == 0:
+        return 0.0  # no walls detected
+    # distances to left and right
+    angles = np.arctan2(lidar_pts[:,1], lidar_pts[:,0])
+    dists = np.linalg.norm(lidar_pts, axis=1)
+    left_mask = (angles > math.pi/6) & (angles < math.pi/2)
+    right_mask = (angles < -math.pi/6) & (angles > -math.pi/2)
+    left_dist = np.min(dists[left_mask]) if np.any(left_mask) else None
+    right_dist = np.min(dists[right_mask]) if np.any(right_mask) else None
+    # compute simple angular correction
+    w_correction = 0.0
+    Kp = 0.002  # small gain
+    if left_dist is not None and left_dist < SAFE_DIST:
+        w_correction -= Kp*(SAFE_DIST - left_dist)
+    if right_dist is not None and right_dist < SAFE_DIST:
+        w_correction += Kp*(SAFE_DIST - right_dist)
+    return w_correction
 
 def run(robot: Robot) -> None:
     configure_robot(robot)
@@ -75,50 +90,54 @@ def run(robot: Robot) -> None:
     period = 1.0 / float(DEFAULT_FSM_HZ)
     next_tick = time.monotonic()
 
+    # define a simple straight path
+    path_control_points = [(0.0,0.0),(0.0,2500.0)]
+    path = densify_polyline(path_control_points, spacing=400.0)
+    robot._set_obstacle_avoidance_path(path)
+
     while True:
         if state == "INIT":
             start_robot(robot)
-            print("[FSM] INIT (odometry reset)")
-            path_control_points = [
-                (300.0, 0.0),
-                (300.0, 2500.0),
-                (1300.0, 2500.0),
-            ]
-            path = densify_polyline(path_control_points, spacing=400.0)
-
-            robot._nav_follow_pp_path(
-                lookahead_distance=100.0,
-                max_linear_speed=140.0,
-                max_angular_speed=1.5,
-                goal_tolerance=20.0,
-                obstacles_range=450.0,
-                view_angle=math.radians(70.0),
-                safe_dist=250.0,
-                avoidance_delay=150,
-                alpha_Ld=0.7,
-                offset=270.0,
-                lane_width=500.0,
-                obstacle_avoidance=True,
-                x_L=300.0,
-            )
-            robot._set_obstacle_avoidance_path(path)
-            print("Path is ready, entering IDLE state.")
+            print("[FSM] INIT - Odometry reset")
             state = "IDLE"
 
         elif state == "IDLE":
             show_idle_leds(robot)
             robot._draw_lidar_obstacles()
-            print("[FSM] IDLE - Press BTN_1 to enter MOVING state.")
+
+            # debug lidar
+            lidar_pts = get_lidar_points(robot)
+            if len(lidar_pts) > 0:
+                print(f"[DEBUG LiDAR] {len(lidar_pts)} points, first {DEBUG_PRINT_POINTS}:\n{lidar_pts[:DEBUG_PRINT_POINTS]}")
+            else:
+                print("[DEBUG LiDAR] No points received")
+
+            print("[FSM] IDLE - Press BTN_1 to start moving")
             if robot.get_button(Button.BTN_1):
-                print("Start moving.")
+                print("Starting MOVING")
                 state = "MOVING"
             elif robot.get_button(Button.BTN_2):
-                print("BTN_2 pressed. Stopping robot and saving trajectory.")
+                print("BTN_2 pressed, shutting down")
                 robot.shutdown()
 
         elif state == "MOVING":
             show_moving_leds(robot)
-            state = robot._nav_follow_pp_path_loop()
+
+            # SDK pure pursuit path following
+            w_lidar = compute_wall_repulsion(get_lidar_points(robot))
+            # get velocity from SDK planner
+            state_sdk = robot._nav_follow_pp_path_loop()
+            # adjust angular speed for basic wall repulsion
+            v, w = robot.get_velocity()
+            robot.set_velocity(v, w + w_lidar)
+
+            # debug print
+            lidar_pts = get_lidar_points(robot)
+            if len(lidar_pts) > 0:
+                print(f"[MOVING DEBUG] LiDAR points {len(lidar_pts)}, first {DEBUG_PRINT_POINTS}:\n{lidar_pts[:DEBUG_PRINT_POINTS]}")
+                print(f"[MOVING DEBUG] Angular correction from walls: {w_lidar:.4f}")
+            else:
+                print("[MOVING DEBUG] No LiDAR points detected")
 
         next_tick += period
         sleep_s = next_tick - time.monotonic()
